@@ -79,6 +79,7 @@ class EsiAccess(object):
 
         # session request stuff
         self._session = Session()
+        self._session.verify = False
         self._session.headers.update({
             'Accept': 'application/json',
             'User-Agent': (
