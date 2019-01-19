@@ -15,7 +15,7 @@ with open("version.yml", 'r+') as file:
     file.truncate()
 
     # python's versioning spec doesn't handle the same format git describe outputs, so convert it.
-    label = os.environ["PYFA_VERSION"] if os.environ["PYFA_VERSION"] else subprocess.check_output(["git", "describe", "--tags"]).strip().decode().split('-')
+    label = os.environ["PYFA_VERSION"].split('-') if os.environ["PYFA_VERSION"] else subprocess.check_output(["git", "describe", "--tags"]).strip().decode().split('-')
     label = '-'.join(label[:-2])+'+'+'-'.join(label[-2:])
     print(label)
     data['version'] = label
