@@ -3,38 +3,31 @@
 import os.path
 from subprocess import call
 import zipfile
-
-
-def zipdir(path, zip):
-    for root, dirs, files in os.walk(path):
-        for file in files:
-            zip.write(os.path.join(root, file))
+from packaging.version import Version
 
 config = {}
 
 exec(compile(open("config.py").read(), "config.py", 'exec'), config)
 
-iscc = "C:\Program Files (x86)\Inno Setup 5\ISCC.exe" # inno script location via wine
+os.environ["PYFA_DIST_DIR"] = os.path.join(os.getcwd(), 'dist')
 
-print("Creating archive")
+os.environ["PYFA_VERSION"] = config['version']
+iscc = "C:\Program Files (x86)\Inno Setup 5\ISCC.exe" # inno script location via wine
 
 source = os.path.join(os.environ["PYFA_DIST_DIR"], "pyfa")
 
 fileName = "pyfa-{}-win".format(os.environ["PYFA_VERSION"])
 
-# archive = zipfile.ZipFile(os.path.join(os.getcwd(), "dist", fileName + ".zip"), 'w', compression=zipfile.ZIP_DEFLATED)
-# zipdir(source, archive)
-# archive.close()
-
 print("Compiling EXE")
 
-expansion = "%s %s" % (config['expansionName'], config['expansionVersion']),
+v = Version(config['version'])
+
+print(v)
 
 call([
     iscc,
     os.path.join(os.getcwd(), "dist_assets", "win", "pyfa-setup.iss"),
-    "/dMyAppVersion=%s" % (config['version']),
-    "/dMyAppExpansion=%s" % expansion,
+    "/dMyAppVersion=%s" % v,
     "/dMyAppDir=%s" % source,
     "/dMyOutputDir=%s" % os.path.join(os.getcwd()),
     "/dMyOutputFile=%s" % fileName])  # stdout=devnull, stderr=devnull

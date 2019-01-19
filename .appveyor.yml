@@ -1,5 +1,4 @@
 environment:
-
   global:
     # SDK v7.0 MSVC Express 2008's SetEnv.cmd script will fail if the
     # /E:ON and /V:ON options are not enabled in the batch script intepreter
@@ -11,7 +10,8 @@ environment:
     - PYTHON: "C:\\Python36"
       PYTHON_VERSION: "3.6.x"
       PYTHON_ARCH: "32"
-
+init:
+  - ps: iex ((new-object net.webclient).DownloadString('https://raw.githubusercontent.com/appveyor/ci/master/scripts/enable-rdp.ps1'))
 install:
   # If there is a newer build queued for the same PR, cancel this one.
   # The AppVeyor 'rollout builds' option is supposed to serve the same
@@ -35,6 +35,11 @@ install:
   - ECHO "Installed SDKs:"
   - ps: "ls \"C:/Program Files/Microsoft SDKs/Windows\""
 
+  # Prepend newly installed Python to the PATH of this build (this cannot be
+  # done from inside the powershell script as it would require to restart
+  # the parent CMD process).
+  - "SET PATH=%PYTHON%;%PYTHON%\\Scripts;%PATH%"
+
   - "python --version"
   - "python -c \"import struct; print(struct.calcsize('P') * 8)\""
 
@@ -51,11 +56,10 @@ install:
   - "pip install PyInstaller"
 
 before_build:
-  - ps: $env:PYFA_VERSION = (git describe --tags)
     # directory that will contain the built files
   - ps: $env:PYFA_DIST_DIR = "c:\projects\$env:APPVEYOR_PROJECT_SLUG\dist"
+  - ps: $env:PYFA_VERSION = (python ./scripts/dump_version.py)
   - ps: echo("pyfa version " + $env:PYFA_VERSION)
-  - "python ./scripts/dump_version.py"
 
 build_script:
   - ECHO "Build pyfa:"
@@ -114,6 +118,7 @@ artifacts:
   - path: pyfa*-win.exe
   #- path: pyfa_debug.zip
   #  name: Pyfa_debug
+  
 deploy:
   tag: $(pyfa_version)
   release: pyfa $(pyfa_version)

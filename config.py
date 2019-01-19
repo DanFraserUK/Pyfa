@@ -28,9 +28,6 @@ saveInRoot = False
 with open("version.yml", 'r') as file:
     data = yaml.load(file)
     version = data['version']
-    tag = data['tag']
-    expansionName = data['expansionName']
-    expansionVersion = data['expansionVersion']
 
 evemonMinVersion = "4081"
 
