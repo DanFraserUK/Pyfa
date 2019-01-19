@@ -25,7 +25,7 @@ added_files = [
              ('../../eve.db', '.'),
              ('../../README.md', '.'),
              ('../../LICENSE', '.'),
-             ('../../.version', '.'),
+             ('../../version.yml', '.'),
              ]
 
 import_these = []

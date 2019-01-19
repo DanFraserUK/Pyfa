@@ -83,12 +83,7 @@ def getPyfaRoot():
 
 
 def getVersion():
-    if os.path.isfile(os.path.join(pyfaPath, '.version')):
-        with open(os.path.join(pyfaPath, '.version')) as f:
-            gitVersion = f.readline()
-        return gitVersion
-    # if no version file exists, then user is running from source or not an official build
-    return version + " (git)"
+    return version
 
 
 def getDefaultSave():
