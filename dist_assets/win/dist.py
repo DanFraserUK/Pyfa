@@ -14,21 +14,17 @@ config = {}
 
 exec(compile(open("config.py").read(), "config.py", 'exec'), config)
 
-iscc =  "C:\Program Files (x86)\Inno Setup 5\ISCC.exe" # inno script location via wine
+iscc = "C:\Program Files (x86)\Inno Setup 5\ISCC.exe" # inno script location via wine
 
 print("Creating archive")
 
-source = os.path.join(os.getcwd(), "dist", "pyfa")
+source = os.path.join(os.environ["PYFA_DIST_DIR"], "pyfa")
 
-fileName = "pyfa-{}-{}-{}-win".format(
-    config['version'],
-    config['expansionName'].lower(),
-    config['expansionVersion']
-)
+fileName = "pyfa-{}-win".format(os.environ["PYFA_VERSION"])
 
-archive = zipfile.ZipFile(os.path.join(os.getcwd(), "dist", fileName + ".zip"), 'w', compression=zipfile.ZIP_DEFLATED)
-zipdir(source, archive)
-archive.close()
+# archive = zipfile.ZipFile(os.path.join(os.getcwd(), "dist", fileName + ".zip"), 'w', compression=zipfile.ZIP_DEFLATED)
+# zipdir(source, archive)
+# archive.close()
 
 print("Compiling EXE")
 
@@ -40,7 +36,7 @@ call([
     "/dMyAppVersion=%s" % (config['version']),
     "/dMyAppExpansion=%s" % expansion,
     "/dMyAppDir=%s" % source,
-    "/dMyOutputDir=%s" % os.path.join(os.getcwd(), "dist"),
+    "/dMyOutputDir=%s" % os.path.join(os.getcwd()),
     "/dMyOutputFile=%s" % fileName])  # stdout=devnull, stderr=devnull
 
 print("Done")

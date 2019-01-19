@@ -1,5 +1,6 @@
 import os
 import sys
+import yaml
 
 from logbook import CRITICAL, DEBUG, ERROR, FingersCrossedHandler, INFO, Logger, NestedSetup, NullHandler, \
     StreamHandler, TimedRotatingFileHandler, WARNING
@@ -24,10 +25,13 @@ saveInRoot = False
 
 # Version data
 
-version = "2.7.0"
-tag = "Stable"
-expansionName = "December"
-expansionVersion = "1.0"
+with open("version.yml", 'r') as file:
+    data = yaml.load(file)
+    version = data['version']
+    tag = data['tag']
+    expansionName = data['expansionName']
+    expansionVersion = data['expansionVersion']
+
 evemonMinVersion = "4081"
 
 minItemSearchLength = 3
