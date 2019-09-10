@@ -19,20 +19,22 @@
 
 
 import re
-from enum import Enum
 
 from logbook import Logger
 
+from eos.const import FittingModuleState, FittingSlot
 from eos.db.gamedata.queries import getDynamicItem
+from eos.saveddata.booster import Booster
 from eos.saveddata.cargo import Cargo
 from eos.saveddata.citadel import Citadel
-from eos.saveddata.booster import Booster
 from eos.saveddata.drone import Drone
 from eos.saveddata.fighter import Fighter
-from eos.saveddata.implant import Implant
-from eos.saveddata.module import Module, State, Slot
-from eos.saveddata.ship import Ship
 from eos.saveddata.fit import Fit
+from eos.saveddata.implant import Implant
+from eos.saveddata.module import Module
+from eos.saveddata.ship import Ship
+from gui.fitCommands.helpers import activeStateLimit
+from service.const import PortEftOptions
 from service.fit import Fit as svcFit
 from service.market import Market
 from service.port.muta import parseMutant, renderMutant
@@ -42,25 +44,20 @@ from service.port.shared import IPortUser, fetchItem, processing_notify
 pyfalog = Logger(__name__)
 
 
-class Options(Enum):
-    IMPLANTS = 1
-    MUTATIONS = 2
-    LOADED_CHARGES = 3
-
-
 EFT_OPTIONS = (
-    (Options.LOADED_CHARGES.value, 'Loaded Charges', 'Export charges loaded into modules', True),
-    (Options.MUTATIONS.value, 'Mutated Attributes', 'Export mutated modules\' stats', True),
-    (Options.IMPLANTS.value, 'Implants && Boosters', 'Export implants and boosters', True),
-)
+    (PortEftOptions.LOADED_CHARGES, 'Loaded Charges', 'Export charges loaded into modules', True),
+    (PortEftOptions.MUTATIONS, 'Mutated Attributes', 'Export mutated modules\' stats', True),
+    (PortEftOptions.IMPLANTS, 'Implants && Boosters', 'Export implants and boosters', True),
+    (PortEftOptions.CARGO, 'Cargo', 'Export cargo hold contents', True))
 
 
 MODULE_CATS = ('Module', 'Subsystem', 'Structure Module')
-SLOT_ORDER = (Slot.LOW, Slot.MED, Slot.HIGH, Slot.RIG, Slot.SUBSYSTEM, Slot.SERVICE)
+SLOT_ORDER = (FittingSlot.LOW, FittingSlot.MED, FittingSlot.HIGH, FittingSlot.RIG, FittingSlot.SUBSYSTEM, FittingSlot.SERVICE)
 OFFLINE_SUFFIX = '/OFFLINE'
+NAME_CHARS = '[^,/\[\]]'  # Characters which are allowed to be used in name
 
 
-def exportEft(fit, options):
+def exportEft(fit, options, callback):
     # EFT formatted export is split in several sections, each section is
     # separated from another using 2 blank lines. Sections might have several
     # sub-sections, which are separated by 1 blank line
@@ -86,21 +83,21 @@ def exportEft(fit, options):
                     modName = module.baseItem.name
                 else:
                     modName = module.item.name
-                if module.isMutated and options[Options.MUTATIONS.value]:
+                if module.isMutated and options[PortEftOptions.MUTATIONS]:
                     mutants[mutantReference] = module
                     mutationSuffix = ' [{}]'.format(mutantReference)
                     mutantReference += 1
                 else:
                     mutationSuffix = ''
-                modOfflineSuffix = ' {}'.format(OFFLINE_SUFFIX) if module.state == State.OFFLINE else ''
-                if module.charge and options[Options.LOADED_CHARGES.value]:
+                modOfflineSuffix = ' {}'.format(OFFLINE_SUFFIX) if module.state == FittingModuleState.OFFLINE else ''
+                if module.charge and options[PortEftOptions.LOADED_CHARGES]:
                     rackLines.append('{}, {}{}{}'.format(
                         modName, module.charge.name, modOfflineSuffix, mutationSuffix))
                 else:
                     rackLines.append('{}{}{}'.format(modName, modOfflineSuffix, mutationSuffix))
             else:
                 rackLines.append('[Empty {} slot]'.format(
-                    Slot.getName(slotType).capitalize() if slotType is not None else ''))
+                    FittingSlot(slotType).name.capitalize() if slotType is not None else ''))
         if rackLines:
             modSection.append('\n'.join(rackLines))
     if modSection:
@@ -108,55 +105,83 @@ def exportEft(fit, options):
 
     # Section 2: drones, fighters
     minionSection = []
-    droneLines = []
-    for drone in sorted(fit.drones, key=lambda d: d.item.name):
-        droneLines.append('{} x{}'.format(drone.item.name, drone.amount))
-    if droneLines:
-        minionSection.append('\n'.join(droneLines))
-    fighterLines = []
-    for fighter in sorted(fit.fighters, key=lambda f: f.item.name):
-        fighterLines.append('{} x{}'.format(fighter.item.name, fighter.amountActive))
-    if fighterLines:
-        minionSection.append('\n'.join(fighterLines))
+    droneExport = exportDrones(fit.drones)
+    if droneExport:
+        minionSection.append(droneExport)
+    fighterExport = exportFighters(fit.fighters)
+    if fighterExport:
+        minionSection.append(fighterExport)
     if minionSection:
         sections.append('\n\n'.join(minionSection))
 
     # Section 3: implants, boosters
-    if options[Options.IMPLANTS.value]:
+    if options[PortEftOptions.IMPLANTS]:
         charSection = []
-        implantLines = []
-        for implant in fit.implants:
-            implantLines.append(implant.item.name)
-        if implantLines:
-            charSection.append('\n'.join(implantLines))
-        boosterLines = []
-        for booster in fit.boosters:
-            boosterLines.append(booster.item.name)
-        if boosterLines:
-            charSection.append('\n'.join(boosterLines))
+        implantExport = exportImplants(fit.implants)
+        if implantExport:
+            charSection.append(implantExport)
+        boosterExport = exportBoosters(fit.boosters)
+        if boosterExport:
+            charSection.append(boosterExport)
         if charSection:
             sections.append('\n\n'.join(charSection))
 
     # Section 4: cargo
-    cargoLines = []
-    for cargo in sorted(
-        fit.cargo,
-        key=lambda c: (c.item.group.category.name, c.item.group.name, c.item.name)
-    ):
-        cargoLines.append('{} x{}'.format(cargo.item.name, cargo.amount))
-    if cargoLines:
-        sections.append('\n'.join(cargoLines))
+    if options[PortEftOptions.CARGO]:
+        cargoExport = exportCargo(fit.cargo)
+        if cargoExport:
+            sections.append(cargoExport)
 
     # Section 5: mutated modules' details
     mutationLines = []
-    if mutants and options[Options.MUTATIONS.value]:
+    if mutants and options[PortEftOptions.MUTATIONS]:
         for mutantReference in sorted(mutants):
             mutant = mutants[mutantReference]
             mutationLines.append(renderMutant(mutant, firstPrefix='[{}] '.format(mutantReference), prefix='  '))
     if mutationLines:
         sections.append('\n'.join(mutationLines))
 
-    return '{}\n\n{}'.format(header, '\n\n\n'.join(sections))
+    text = '{}\n\n{}'.format(header, '\n\n\n'.join(sections))
+
+    if callback:
+        callback(text)
+    else:
+        return text
+
+
+def exportDrones(drones):
+    droneLines = []
+    for drone in sorted(drones, key=lambda d: d.item.name):
+        droneLines.append('{} x{}'.format(drone.item.name, drone.amount))
+    return '\n'.join(droneLines)
+
+
+def exportFighters(fighters):
+    fighterLines = []
+    for fighter in sorted(fighters, key=lambda f: f.item.name):
+        fighterLines.append('{} x{}'.format(fighter.item.name, fighter.amount))
+    return '\n'.join(fighterLines)
+
+
+def exportImplants(implants):
+    implantLines = []
+    for implant in sorted(implants, key=lambda i: i.slot or 0):
+        implantLines.append(implant.item.name)
+    return '\n'.join(implantLines)
+
+
+def exportBoosters(boosters):
+    boosterLines = []
+    for booster in sorted(boosters, key=lambda b: b.slot or 0):
+        boosterLines.append(booster.item.name)
+    return '\n'.join(boosterLines)
+
+
+def exportCargo(cargos):
+    cargoLines = []
+    for cargo in sorted(cargos, key=lambda c: (c.item.group.category.name, c.item.group.name, c.item.name)):
+        cargoLines.append('{} x{}'.format(cargo.item.name, cargo.amount))
+    return '\n'.join(cargoLines)
 
 
 def importEft(lines):
@@ -169,10 +194,9 @@ def importEft(lines):
     aFit = AbstractFit()
     aFit.mutations = _importGetMutationData(lines)
 
-    nameChars = '[^,/\[\]]'  # Characters which are allowed to be used in name
     stubPattern = '^\[.+?\]$'
-    modulePattern = '^(?P<typeName>{0}+?)(,\s*(?P<chargeName>{0}+?))?(?P<offline>\s*{1})?(\s*\[(?P<mutation>\d+?)\])?$'.format(nameChars, OFFLINE_SUFFIX)
-    droneCargoPattern = '^(?P<typeName>{}+?) x(?P<amount>\d+?)$'.format(nameChars)
+    modulePattern = '^(?P<typeName>{0}+?)(,\s*(?P<chargeName>{0}+?))?(?P<offline>\s*{1})?(\s*\[(?P<mutation>\d+?)\])?$'.format(NAME_CHARS, OFFLINE_SUFFIX)
+    droneCargoPattern = '^(?P<typeName>{}+?) x(?P<amount>\d+?)$'.format(NAME_CHARS)
 
     sections = []
     for section in _importSectionIter(lines):
@@ -254,7 +278,9 @@ def importEft(lines):
         elif m.fits(fit):
             m.owner = fit
             fit.modules.replaceRackPosition(i, m)
-    svcFit.getInstance().recalc(fit)
+    sFit = svcFit.getInstance()
+    sFit.recalc(fit)
+    sFit.fill(fit)
 
     # Other stuff
     for modRack in (
@@ -441,8 +467,8 @@ def importEftCfg(shipname, lines, iportuser):
                     else:
                         m.owner = fitobj
                         # Activate mod if it is activable
-                        if m.isValidState(State.ACTIVE):
-                            m.state = State.ACTIVE
+                        if m.isValidState(FittingModuleState.ACTIVE):
+                            m.state = activeStateLimit(m.item)
                         # Add charge to mod if applicable, on any errors just don't add anything
                         if chargeName:
                             try:
@@ -456,7 +482,9 @@ def importEftCfg(shipname, lines, iportuser):
                         moduleList.append(m)
 
             # Recalc to get slot numbers correct for T3 cruisers
-            svcFit.getInstance().recalc(fitobj)
+            sFit = svcFit.getInstance()
+            sFit.recalc(fitobj)
+            sFit.fill(fitobj)
 
             for module in moduleList:
                 if module.fits(fitobj):
@@ -722,12 +750,12 @@ class AbstractFit:
     @property
     def __slotContainerMap(self):
         return {
-            Slot.HIGH: self.modulesHigh,
-            Slot.MED: self.modulesMed,
-            Slot.LOW: self.modulesLow,
-            Slot.RIG: self.rigs,
-            Slot.SUBSYSTEM: self.subsystems,
-            Slot.SERVICE: self.services}
+            FittingSlot.HIGH: self.modulesHigh,
+            FittingSlot.MED: self.modulesMed,
+            FittingSlot.LOW: self.modulesLow,
+            FittingSlot.RIG: self.rigs,
+            FittingSlot.SUBSYSTEM: self.subsystems,
+            FittingSlot.SERVICE: self.services}
 
     def getContainerBySlot(self, slotType):
         return self.__slotContainerMap.get(slotType)
@@ -798,10 +826,10 @@ class AbstractFit:
 
         if itemSpec.charge is not None and m.isValidCharge(itemSpec.charge):
             m.charge = itemSpec.charge
-        if itemSpec.offline and m.isValidState(State.OFFLINE):
-            m.state = State.OFFLINE
-        elif m.isValidState(State.ACTIVE):
-            m.state = State.ACTIVE
+        if itemSpec.offline and m.isValidState(FittingModuleState.OFFLINE):
+            m.state = FittingModuleState.OFFLINE
+        elif m.isValidState(FittingModuleState.ACTIVE):
+            m.state = activeStateLimit(m.item)
         return m
 
     def addImplant(self, itemSpec):
@@ -834,3 +862,99 @@ class AbstractFit:
         if itemSpec.item not in self.cargo:
             self.cargo[itemSpec.item] = Cargo(itemSpec.item)
         self.cargo[itemSpec.item].amount += itemSpec.amount
+
+
+
+def _lineIter(text):
+    """Iterate over non-blank lines."""
+    for line in text.splitlines():
+        line = line.strip()
+        if line:
+            yield line
+
+
+def parseAdditions(text):
+    items = []
+    sMkt = Market.getInstance()
+    pattern = '^(?P<typeName>{}+?)( x(?P<amount>\d+?))?$'.format(NAME_CHARS)
+    for line in _lineIter(text):
+        m = re.match(pattern, line)
+        if not m:
+            continue
+        item = sMkt.getItem(m.group('typeName'))
+        if item is None:
+            continue
+        amount = m.group('amount')
+        amount = 1 if amount is None else int(amount)
+        items.append((item, amount))
+    return items
+
+
+def isValidDroneImport(text):
+    pattern = 'x\d+$'
+    for line in _lineIter(text):
+        if not re.search(pattern, line):
+            return False, ()
+    itemData = parseAdditions(text)
+    if not itemData:
+        return False, ()
+    for item, amount in itemData:
+        if not item.isDrone:
+            return False, ()
+    return True, itemData
+
+
+def isValidFighterImport(text):
+    pattern = 'x\d+$'
+    for line in _lineIter(text):
+        if not re.search(pattern, line):
+            return False, ()
+    itemData = parseAdditions(text)
+    if not itemData:
+        return False, ()
+    for item, amount in itemData:
+        if not item.isFighter:
+            return False, ()
+    return True, itemData
+
+
+def isValidCargoImport(text):
+    pattern = 'x\d+$'
+    for line in _lineIter(text):
+        if not re.search(pattern, line):
+            return False, ()
+    itemData = parseAdditions(text)
+    if not itemData:
+        return False, ()
+    for item, amount in itemData:
+        if item.isAbyssal:
+            return False, ()
+    return True, itemData
+
+
+def isValidImplantImport(text):
+    pattern = 'x\d+$'
+    for line in _lineIter(text):
+        if re.search(pattern, line):
+            return False, ()
+    itemData = parseAdditions(text)
+    if not itemData:
+        return False, ()
+    for item, amount in itemData:
+        if not item.isImplant:
+            return False, ()
+    return True, itemData
+
+
+def isValidBoosterImport(text):
+    pattern = 'x\d+$'
+    for line in _lineIter(text):
+        if re.search(pattern, line):
+            return False, ()
+    itemData = parseAdditions(text)
+    if not itemData:
+        return False, ()
+    for item, amount in itemData:
+        if not item.isBooster:
+            return False, ()
+    return True, itemData

@@ -29,10 +29,13 @@ from bs4 import UnicodeDammit
 from logbook import Logger
 
 from eos import db
-from eos.saveddata.fit import ImplantLocation
+from eos.const import ImplantLocation
 from service.fit import Fit as svcFit
 from service.port.dna import exportDna, importDna
-from service.port.eft import exportEft, importEft, importEftCfg
+from service.port.eft import (
+    exportEft, importEft, importEftCfg,
+    isValidDroneImport, isValidFighterImport, isValidCargoImport,
+    isValidImplantImport, isValidBoosterImport)
 from service.port.esi import exportESI, importESI
 from service.port.multibuy import exportMultiBuy
 from service.port.shared import IPortUser, UserCancelException, processing_notify
@@ -46,7 +49,7 @@ pyfalog = Logger(__name__)
 RE_XML_START = r'<\?xml\s+version="1.0"\s*\?>'
 
 
-class Port(object):
+class Port:
     """Service which houses all import/export format functions"""
     instance = None
     __tag_replace_flag = True
@@ -76,8 +79,7 @@ class Port(object):
             success = True
             try:
                 iportuser.on_port_process_start()
-                backedUpFits = Port.exportXml(iportuser,
-                                              *svcFit.getInstance().getAllFits())
+                backedUpFits = Port.exportXml(svcFit.getInstance().getAllFits(), iportuser)
                 backupFile = open(path, "w", encoding="utf-8")
                 backupFile.write(backedUpFits)
                 backupFile.close()
@@ -145,7 +147,7 @@ class Port(object):
                     continue
 
                 try:
-                    _, fitsImport = Port.importAuto(srcString, path, iportuser=iportuser)
+                    importType, makesNewFits, fitsImport = Port.importAuto(srcString, path, iportuser=iportuser)
                     fit_list += fitsImport
                 except xml.parsers.expat.ExpatError:
                     pyfalog.warning("Malformed XML in:\n{0}", path)
@@ -157,7 +159,7 @@ class Port(object):
                 # Set some more fit attributes and save
                 fit.character = sFit.character
                 fit.damagePattern = sFit.pattern
-                fit.targetResists = sFit.targetResists
+                fit.targetProfile = sFit.targetProfile
                 if len(fit.implants) > 0:
                     fit.implantLocation = ImplantLocation.FIT
                 else:
@@ -189,13 +191,13 @@ class Port(object):
         # TODO: catch the exception?
         # activeFit is reserved?, bufferStr is unicode? (assume only clipboard string?
         sFit = svcFit.getInstance()
-        importType, importData = Port.importAuto(bufferStr, activeFit=activeFit)
+        importType, makesNewFits, importData = Port.importAuto(bufferStr, activeFit=activeFit)
 
-        if importType != "MutatedItem":
+        if makesNewFits:
             for fit in importData:
                 fit.character = sFit.character
                 fit.damagePattern = sFit.pattern
-                fit.targetResists = sFit.targetResists
+                fit.targetProfile = sFit.targetProfile
                 if len(fit.implants) > 0:
                     fit.implantLocation = ImplantLocation.FIT
                 else:
@@ -218,34 +220,58 @@ class Port(object):
 
         # If XML-style start of tag encountered, detect as XML
         if re.search(RE_XML_START, firstLine):
-            return "XML", cls.importXml(string, iportuser)
+            return "XML", True, cls.importXml(string, iportuser)
 
         # If JSON-style start, parse as CREST/JSON
         if firstLine[0] == '{':
-            return "JSON", (cls.importESI(string),)
+            return "JSON", True, (cls.importESI(string),)
 
         # If we've got source file name which is used to describe ship name
         # and first line contains something like [setup name], detect as eft config file
         if re.match("\[.*\]", firstLine) and path is not None:
             filename = os.path.split(path)[1]
             shipName = filename.rsplit('.')[0]
-            return "EFT Config", cls.importEftCfg(shipName, lines, iportuser)
+            return "EFT Config", True, cls.importEftCfg(shipName, lines, iportuser)
 
         # If no file is specified and there's comma between brackets,
         # consider that we have [ship, setup name] and detect like eft export format
         if re.match("\[.*,.*\]", firstLine):
-            return "EFT", (cls.importEft(lines),)
+            return "EFT", True, (cls.importEft(lines),)
 
         # Check if string is in DNA format
-        if re.match("\d+(:\d+(;\d+))*::", firstLine):
-            return "DNA", (cls.importDna(string),)
+        dnaPattern = "\d+(:\d+(;\d+))*::"
+        if re.match(dnaPattern, firstLine):
+            return "DNA", True, (cls.importDna(string),)
+        dnaChatPattern = "<url=fitting:(?P<dna>{})>(?P<fitName>[^<>]+)</url>".format(dnaPattern)
+        m = re.search(dnaChatPattern, firstLine)
+        if m:
+            return "DNA", True, (cls.importDna(m.group("dna"), fitName=m.group("fitName")),)
 
-        # Assume that we import stand-alone abyssal module if all else fails
-        try:
-            return "MutatedItem", (parseMutant(lines),)
-        except:
-            pass
-
+        if activeFit is not None:
+            # Try to import mutated module
+            try:
+                baseItem, mutaplasmidItem, mutations = parseMutant(lines)
+            except:
+                pass
+            else:
+                if baseItem is not None and mutaplasmidItem is not None:
+                    return "MutatedItem", False, ((baseItem, mutaplasmidItem, mutations),)
+            # Try to import into one of additions panels
+            isDrone, droneData = isValidDroneImport(string)
+            if isDrone:
+                return "AdditionsDrones", False, (droneData,)
+            isFighter, fighterData = isValidFighterImport(string)
+            if isFighter:
+                return "AdditionsFighters", False, (fighterData,)
+            isImplant, implantData = isValidImplantImport(string)
+            if isImplant:
+                return "AdditionsImplants", False, (implantData,)
+            isBooster, boosterData = isValidBoosterImport(string)
+            if isBooster:
+                return "AdditionsBoosters", False, (boosterData,)
+            isCargo, cargoData = isValidCargoImport(string)
+            if isCargo:
+                return "AdditionsCargo", False, (cargoData,)
 
     # EFT-related methods
     @staticmethod
@@ -257,17 +283,17 @@ class Port(object):
         return importEftCfg(shipname, lines, iportuser)
 
     @classmethod
-    def exportEft(cls, fit, options):
-        return exportEft(fit, options)
+    def exportEft(cls, fit, options, callback=None):
+        return exportEft(fit, options, callback=callback)
 
     # DNA-related methods
     @staticmethod
-    def importDna(string):
-        return importDna(string)
+    def importDna(string, fitName=None):
+        return importDna(string, fitName=fitName)
 
     @staticmethod
-    def exportDna(fit):
-        return exportDna(fit)
+    def exportDna(fit, options, callback=None):
+        return exportDna(fit, options, callback=callback)
 
     # ESI-related methods
     @staticmethod
@@ -275,8 +301,8 @@ class Port(object):
         return importESI(string)
 
     @staticmethod
-    def exportESI(fit):
-        return exportESI(fit)
+    def exportESI(fit, callback=None):
+        return exportESI(fit, callback=callback)
 
     # XML-related methods
     @staticmethod
@@ -284,10 +310,10 @@ class Port(object):
         return importXml(text, iportuser)
 
     @staticmethod
-    def exportXml(iportuser=None, *fits):
-        return exportXml(iportuser, *fits)
+    def exportXml(fits, iportuser=None, callback=None):
+        return exportXml(fits, iportuser, callback=callback)
 
     # Multibuy-related methods
     @staticmethod
-    def exportMultiBuy(fit, options):
-        return exportMultiBuy(fit, options)
+    def exportMultiBuy(fit, options, callback=None):
+        return exportMultiBuy(fit, options, callback=callback)

@@ -17,6 +17,9 @@
 # along with pyfa.  If not, see <http://www.gnu.org/licenses/>.
 # =============================================================================
 
+
+import math
+
 # noinspection PyPackageRequirements
 import wx
 
@@ -30,6 +33,7 @@ from gui.utils.staticHelpers import DragDropHelper
 from service.fit import Fit
 from service.market import Market
 import gui.fitCommands as cmd
+from gui.fitCommands.helpers import droneStackLimit
 
 
 class DroneViewDrop(wx.DropTarget):
@@ -61,7 +65,7 @@ class DroneView(Display):
     ]
 
     def __init__(self, parent):
-        Display.__init__(self, parent, style=wx.LC_SINGLE_SEL | wx.BORDER_NONE)
+        Display.__init__(self, parent, style=wx.BORDER_NONE)
 
         self.lastFitId = None
 
@@ -72,16 +76,13 @@ class DroneView(Display):
 
         self.mainFrame.Bind(GE.FIT_CHANGED, self.fitChanged)
         self.mainFrame.Bind(ITEM_SELECTED, self.addItem)
-        self.Bind(wx.EVT_LEFT_DCLICK, self.removeItem)
+        self.Bind(wx.EVT_LEFT_DCLICK, self.onLeftDoubleClick)
         self.Bind(wx.EVT_LEFT_DOWN, self.click)
         self.Bind(wx.EVT_KEY_UP, self.kbEvent)
         self.Bind(wx.EVT_MOTION, self.OnMouseMove)
         self.Bind(wx.EVT_LEAVE_WINDOW, self.OnLeaveWindow)
 
-        if "__WXGTK__" in wx.PlatformInfo:
-            self.Bind(wx.EVT_RIGHT_UP, self.scheduleMenu)
-        else:
-            self.Bind(wx.EVT_RIGHT_DOWN, self.scheduleMenu)
+        self.Bind(wx.EVT_CONTEXT_MENU, self.spawnMenu)
 
         self.Bind(wx.EVT_LIST_BEGIN_DRAG, self.startDrag)
         self.SetDropTarget(DroneViewDrop(self.handleDragDrop))
@@ -101,7 +102,10 @@ class DroneView(Display):
                 self.hoveredRow = row
                 self.hoveredColumn = col
                 if row != -1 and col != -1 and col < len(self.DEFAULT_COLS):
-                    mod = self.drones[self.GetItemData(row)]
+                    try:
+                        mod = self.drones[row]
+                    except IndexError:
+                        return
                     if self.DEFAULT_COLS[col] == "Miscellanea":
                         tooltip = self.activeColumns[col].getToolTip(mod)
                         if tooltip is not None:
@@ -116,17 +120,22 @@ class DroneView(Display):
 
     def kbEvent(self, event):
         keycode = event.GetKeyCode()
-        if keycode == wx.WXK_DELETE or keycode == wx.WXK_NUMPAD_DELETE:
-            row = self.GetFirstSelected()
-            if row != -1:
-                drone = self.drones[self.GetItemData(row)]
-                self.removeDrone(drone)
-
+        mstate = wx.GetMouseState()
+        if keycode == wx.WXK_ESCAPE and mstate.GetModifiers() == wx.MOD_NONE:
+            self.unselectAll()
+        elif keycode == 65 and mstate.GetModifiers() == wx.MOD_CONTROL:
+            self.selectAll()
+        elif keycode in (wx.WXK_DELETE, wx.WXK_NUMPAD_DELETE) and mstate.GetModifiers() == wx.MOD_NONE:
+            drones = self.getSelectedDrones()
+            self.removeDroneStacks(drones)
         event.Skip()
 
     def startDrag(self, event):
         row = event.GetIndex()
         if row != -1:
+            self.unselectAll()
+            self.Select(row, True)
+
             data = wx.TextDataObject()
             dataStr = "drone:" + str(row)
             data.SetText(dataStr)
@@ -144,26 +153,41 @@ class DroneView(Display):
             data[0] is hard-coded str of originating source
             data[1] is typeID or index of data we want to manipulate
         """
-        if data[0] == "drone":  # we want to merge drones
-            pass
-            # remove merge functionality, if people complain in the next while, can add it back
-            # srcRow = int(data[1])
-            # dstRow, _ = self.HitTest((x, y))
-            # if srcRow != -1 and dstRow != -1:
-            #     self._merge(srcRow, dstRow)
+        if data[0] == "drone":
+            srcRow = int(data[1])
+            if srcRow != -1:
+                if wx.GetMouseState().GetModifiers() == wx.MOD_CONTROL:
+                    try:
+                        srcDrone = self.drones[srcRow]
+                    except IndexError:
+                        return
+                    if srcDrone not in self.original:
+                        return
+                    self.mainFrame.command.Submit(cmd.GuiCloneLocalDroneCommand(
+                        fitID=self.mainFrame.getActiveFit(),
+                        position=self.original.index(srcDrone)))
+                else:
+                    dstRow, _ = self.HitTest((x, y))
+                    if dstRow != -1:
+                        self._merge(srcRow, dstRow)
         elif data[0] == "market":
             wx.PostEvent(self.mainFrame, ItemSelected(itemID=int(data[1])))
 
-    def _merge(self, src, dst):
-        sFit = Fit.getInstance()
+    def _merge(self, srcRow, dstRow):
         fitID = self.mainFrame.getActiveFit()
-
-        if sFit.mergeDrones(fitID, self.drones[src], self.drones[dst]):
-            wx.PostEvent(self.mainFrame, GE.FitChanged(fitID=fitID))
+        try:
+            srcDrone = self.drones[srcRow]
+            dstDrone = self.drones[dstRow]
+        except IndexError:
+            return
+        if srcDrone in self.original and dstDrone in self.original:
+            srcPosition = self.original.index(srcDrone)
+            dstPosition = self.original.index(dstDrone)
+            self.mainFrame.command.Submit(cmd.GuiMergeLocalDroneStacksCommand(
+                fitID=fitID, srcPosition=srcPosition, dstPosition=dstPosition))
 
     DRONE_ORDER = ('Light Scout Drones', 'Medium Scout Drones',
-                   'Heavy Attack Drones', 'Sentry Drones', 'Fighters',
-                   'Fighter Bombers', 'Combat Utility Drones',
+                   'Heavy Attack Drones', 'Sentry Drones', 'Combat Utility Drones',
                    'Electronic Warfare Drones', 'Logistic Drones', 'Mining Drones', 'Salvage Drones')
 
     def droneKey(self, drone):
@@ -175,86 +199,141 @@ class DroneView(Display):
                 drone.item.name)
 
     def fitChanged(self, event):
+        event.Skip()
+        activeFitID = self.mainFrame.getActiveFit()
+        if activeFitID is not None and activeFitID not in event.fitIDs:
+            return
+
         sFit = Fit.getInstance()
-        fit = sFit.getFit(event.fitID)
+        fit = sFit.getFit(activeFitID)
 
         self.Parent.Parent.DisablePage(self, not fit or fit.isStructure)
 
         # Clear list and get out if current fitId is None
-        if event.fitID is None and self.lastFitId is not None:
+        if activeFitID is None and self.lastFitId is not None:
             self.DeleteAllItems()
             self.lastFitId = None
-            event.Skip()
             return
 
         self.original = fit.drones if fit is not None else None
-        self.drones = stuff = fit.drones[:] if fit is not None else None
+        self.drones = fit.drones[:] if fit is not None else None
 
-        if stuff is not None:
-            stuff.sort(key=self.droneKey)
+        if self.drones is not None:
+            self.drones.sort(key=self.droneKey)
 
-        if event.fitID != self.lastFitId:
-            self.lastFitId = event.fitID
+        if activeFitID != self.lastFitId:
+            self.lastFitId = activeFitID
 
             item = self.GetNextItem(-1, wx.LIST_NEXT_ALL, wx.LIST_STATE_DONTCARE)
 
             if item != -1:
                 self.EnsureVisible(item)
 
-            self.deselectItems()
+            self.unselectAll()
 
-        self.update(stuff)
-        event.Skip()
+        self.update(self.drones)
 
     def addItem(self, event):
-        sFit = Fit.getInstance()
+        item = Market.getInstance().getItem(event.itemID, eager='group.category')
+        if item is None or not item.isDrone:
+            event.Skip()
+            return
+
         fitID = self.mainFrame.getActiveFit()
-
-        fit = sFit.getFit(fitID)
-
+        fit = Fit.getInstance().getFit(fitID)
         if not fit or fit.isStructure:
             event.Skip()
             return
 
-        if self.mainFrame.command.Submit(cmd.GuiAddDroneCommand(fitID, event.itemID)):
-            self.mainFrame.additionsPane.select("Drones")
+        amount = droneStackLimit(fit, event.itemID) if wx.GetMouseState().GetModifiers() == wx.MOD_ALT else 1
+        if self.mainFrame.command.Submit(cmd.GuiAddLocalDroneCommand(fitID=fitID, itemID=event.itemID, amount=amount)):
+            self.mainFrame.additionsPane.select('Drones')
 
         event.Skip()
 
-    def removeItem(self, event):
+    def onLeftDoubleClick(self, event):
         row, _ = self.HitTest(event.Position)
         if row != -1:
             col = self.getColumn(event.Position)
             if col != self.getColIndex(State):
-                drone = self.drones[self.GetItemData(row)]
-                self.removeDrone(drone)
+                try:
+                    drone = self.drones[row]
+                except IndexError:
+                    return
+                if wx.GetMouseState().GetModifiers() == wx.MOD_ALT:
+                    self.removeDroneStacks([drone])
+                else:
+                    self.removeDrone(drone)
 
     def removeDrone(self, drone):
         fitID = self.mainFrame.getActiveFit()
-        self.mainFrame.command.Submit(cmd.GuiRemoveDroneCommand(fitID, self.original.index(drone)))
+        if drone in self.original:
+            position = self.original.index(drone)
+            self.mainFrame.command.Submit(cmd.GuiRemoveLocalDronesCommand(
+                fitID=fitID, positions=[position], amount=1))
+
+    def removeDroneStacks(self, drones):
+        fitID = self.mainFrame.getActiveFit()
+        positions = []
+        for drone in drones:
+            if drone in self.original:
+                positions.append(self.original.index(drone))
+        self.mainFrame.command.Submit(cmd.GuiRemoveLocalDronesCommand(
+            fitID=fitID, positions=positions, amount=math.inf))
 
     def click(self, event):
-        event.Skip()
-        row, _ = self.HitTest(event.Position)
-        if row != -1:
+        mainRow, _ = self.HitTest(event.Position)
+        if mainRow != -1:
             col = self.getColumn(event.Position)
             if col == self.getColIndex(State):
-                fitID = self.mainFrame.getActiveFit()
-                drone = self.drones[row]
-                self.mainFrame.command.Submit(cmd.GuiToggleDroneCommand(fitID, self.original.index(drone)))
-
-    def scheduleMenu(self, event):
+                try:
+                    mainDrone = self.drones[mainRow]
+                except IndexError:
+                    return
+                if mainDrone in self.original:
+                    mainPosition = self.original.index(mainDrone)
+                    positions = []
+                    for row in self.getSelectedRows():
+                        try:
+                            drone = self.drones[row]
+                        except IndexError:
+                            continue
+                        if drone in self.original:
+                            positions.append(self.original.index(drone))
+                    if mainPosition not in positions:
+                        positions = [mainPosition]
+                    self.mainFrame.command.Submit(cmd.GuiToggleLocalDroneStatesCommand(
+                        fitID=self.mainFrame.getActiveFit(),
+                        mainPosition=mainPosition,
+                        positions=positions))
+                    return
         event.Skip()
-        if self.getColumn(event.Position) != self.getColIndex(State):
-            wx.CallAfter(self.spawnMenu)
 
-    def spawnMenu(self):
-        sel = self.GetFirstSelected()
-        if sel != -1:
-            drone = self.drones[sel]
+    def spawnMenu(self, event):
+        clickedPos = self.getRowByAbs(event.Position)
+        self.ensureSelection(clickedPos)
 
-            sMkt = Market.getInstance()
-            sourceContext = "droneItem"
-            itemContext = sMkt.getCategoryByItem(drone.item).name
-            menu = ContextMenu.getMenu((drone,), (sourceContext, itemContext))
+        mainDrone = None
+        if clickedPos != -1:
+            try:
+                drone = self.drones[clickedPos]
+            except IndexError:
+                pass
+            else:
+                if drone in self.original:
+                    mainDrone = drone
+        selection = self.getSelectedDrones()
+        itemContext = None if mainDrone is None else Market.getInstance().getCategoryByItem(mainDrone.item).name
+        menu = ContextMenu.getMenu(self, mainDrone, selection, ("droneItem", itemContext), ("droneItemMisc", itemContext))
+        if menu:
             self.PopupMenu(menu)
+
+    def getSelectedDrones(self):
+        drones = []
+        for row in self.getSelectedRows():
+            try:
+                drone = self.drones[row]
+            except IndexError:
+                continue
+            drones.append(drone)
+        return drones

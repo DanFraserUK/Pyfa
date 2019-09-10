@@ -9,6 +9,7 @@ pyfalog = Logger(__name__)
 
 
 class MarketTree(wx.TreeCtrl):
+
     def __init__(self, parent, marketBrowser):
         wx.TreeCtrl.__init__(self, parent, style=wx.TR_DEFAULT_STYLE | wx.TR_HIDE_ROOT)
         pyfalog.debug("Initialize marketTree")
@@ -32,10 +33,11 @@ class MarketTree(wx.TreeCtrl):
 
         # Add recently used modules node
         rumIconId = self.addImage("market_small", "gui")
-        self.AppendItem(self.root, "Recently Used Modules", rumIconId, data=RECENTLY_USED_MODULES)
+        self.AppendItem(self.root, "Recently Used Items", rumIconId, data=RECENTLY_USED_MODULES)
 
         # Bind our lookup method to when the tree gets expanded
         self.Bind(wx.EVT_TREE_ITEM_EXPANDING, self.expandLookup)
+        self.Bind(wx.EVT_TREE_ITEM_COLLAPSED, self.OnCollapsed)
 
     def addImage(self, iconFile, location="icons"):
         if iconFile is None:
@@ -70,9 +72,12 @@ class MarketTree(wx.TreeCtrl):
 
             self.SortChildren(root)
 
+    def OnCollapsed(self, event):
+        self.CollapseAllChildren(event.Item)
+        event.Skip()
+
     def jump(self, item):
         """Open market group and meta tab of given item"""
-        self.marketBrowser.searchMode = False
         sMkt = self.sMkt
         mg = sMkt.getMarketGroupByItem(item)
 
@@ -96,4 +101,3 @@ class MarketTree(wx.TreeCtrl):
             self.Expand(item)
 
         self.SelectItem(item)
-        self.marketBrowser.itemView.selectionMade()

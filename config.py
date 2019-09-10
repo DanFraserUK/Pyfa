@@ -1,10 +1,12 @@
 import os
 import sys
 import yaml
+import wx
 
 from logbook import CRITICAL, DEBUG, ERROR, FingersCrossedHandler, INFO, Logger, NestedSetup, NullHandler, \
     StreamHandler, TimedRotatingFileHandler, WARNING
 import hashlib
+from eos.const import FittingSlot
 
 from cryptography.fernet import Fernet
 
@@ -47,6 +49,13 @@ LOGLEVEL_MAP = {
     "debug": DEBUG,
 }
 
+slotColourMap = {
+    FittingSlot.LOW: wx.Colour(250, 235, 204),  # yellow = low slots
+    FittingSlot.MED: wx.Colour(188, 215, 241),  # blue   = mid slots
+    FittingSlot.HIGH: wx.Colour(235, 204, 209),  # red    = high slots
+    FittingSlot.RIG: '',
+    FittingSlot.SUBSYSTEM: ''
+}
 
 def getClientSecret():
     return clientHash
@@ -86,7 +95,7 @@ def defPaths(customSavePath=None):
     global pyfaPath
     global savePath
     global saveDB
-    global gameDB 
+    global gameDB
     global saveInRoot
     global logPath
     global cipher
@@ -104,7 +113,7 @@ def defPaths(customSavePath=None):
     # Version data
 
     with open(os.path.join(pyfaPath, "version.yml"), 'r') as file:
-        data = yaml.load(file)
+        data = yaml.load(file, Loader=yaml.SafeLoader)
         version = data['version']
 
     # Where we store the saved fits etc, default is the current users home directory
@@ -161,9 +170,6 @@ def defPaths(customSavePath=None):
     # saveddata db location modifier, shouldn't ever need to touch this
     eos.config.saveddata_connectionstring = "sqlite:///" + saveDB + "?check_same_thread=False"
     eos.config.gamedata_connectionstring = "sqlite:///" + gameDB + "?check_same_thread=False"
-
-    print(eos.config.saveddata_connectionstring)
-    print(eos.config.gamedata_connectionstring)
 
     # initialize the settings
     from service.settings import EOSSettings
@@ -227,7 +233,7 @@ def defLogging():
         ])
 
 
-class LoggerWriter(object):
+class LoggerWriter:
     def __init__(self, level):
         # self.level is really like using log.debug(message)
         # at least in my case

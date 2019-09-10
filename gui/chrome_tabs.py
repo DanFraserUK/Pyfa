@@ -64,8 +64,9 @@ class PageChanging(_PageChanging, NotebookTabChangeEvent, VetoAble):
 
 
 class PageChanged(_PageChanged, NotebookTabChangeEvent):
-    def __init__(self, old, new):
-        _PageChanged.__init__(self)
+
+    def __init__(self, old, new, *args, **kwargs):
+        _PageChanged.__init__(self, *args, **kwargs)
         NotebookTabChangeEvent.__init__(self, old, new)
 
 
@@ -236,13 +237,16 @@ class ChromeNotebook(wx.Panel):
 
         self.tabs_container.DisableTab(idx, toggle)
 
-    def SetSelection(self, page):
+    def SetSelection(self, page, focus=True):
         old_selection = self.GetSelection()
         if old_selection != page:
             self._active_page.Hide()
             self._active_page = self._pages[page]
             self.tabs_container.SetSelected(page)
             self.ShowActive()
+            if focus:
+                self._active_page.SetFocus()
+            wx.PostEvent(self, PageChanged(old_selection, page))
 
     def DeletePage(self, n):
         page = self._pages[n]
@@ -1329,14 +1333,12 @@ class _TabsContainer(wx.Panel):
             if not self.preview_tab.GetSelected():
                 page = self.Parent.GetPage(self.GetTabIndex(self.preview_tab))
                 if page.Snapshot():
-
                     self.preview_wnd = PFNotebookPagePreview(
-                                                        self,
-                                                        (mposx + 3, mposy + 3),
-                                                        page.Snapshot(),
-                                                        self.preview_tab.text)
+                        self,
+                        (mposx + 3, mposy + 3),
+                        page.Snapshot(),
+                        self.preview_tab.text)
                     self.preview_wnd.Show()
-
         event.Skip()
 
 
@@ -1387,7 +1389,7 @@ class PFNotebookPagePreview(wx.Frame):
         if self.transp < 0:
             self.transp = 0
             self.timer.Stop()
-            wx.Frame.Show(self, False)
+            super().Show(False)
             self.Destroy()
             return
         self.SetTransparent(self.transp)
@@ -1403,7 +1405,7 @@ class PFNotebookPagePreview(wx.Frame):
 
     def Show(self, showWnd=True):
         if showWnd:
-            wx.Frame.Show(self, showWnd)
+            super().Show(showWnd)
             self.RaiseParent()
             self.direction = 1
             self.timer.Start(10)
@@ -1439,81 +1441,3 @@ class PFNotebookPagePreview(wx.Frame):
         mdc.SetBrush(wx.TRANSPARENT_BRUSH)
 
         mdc.DrawRectangle(0, 16, rect.width, rect.height - 16)
-
-
-if __name__ == "__main__":
-
-    # need to set up some paths, since bitmap loader requires config to have things
-    # Should probably change that so that it's not dependant on config
-    import os
-    os.chdir('..')
-    import config
-    config.defPaths(None)
-
-    class Frame(wx.Frame):
-        def __init__(self, title):
-            super().__init__(None, title=title, size=(1000, 500))
-
-            if 'wxMSW' in wx.PlatformInfo:
-                color = wx.SystemSettings.GetColour(wx.SYS_COLOUR_BTNFACE)
-                self.SetBackgroundColour(color)
-
-            main_sizer = wx.BoxSizer(wx.HORIZONTAL)
-            splitter = wx.SplitterWindow(self, style=wx.SP_LIVE_UPDATE)
-            main_sizer.Add(splitter, 1, wx.EXPAND | wx.ALL, 2)
-
-            # Main test notebook
-            self.notebook = ChromeNotebook(splitter)
-
-            # Tests can_add, has dummy tabs
-            notebook2 = ChromeNotebook(splitter, can_add=False)
-
-            self.statusbar = self.CreateStatusBar()
-
-            panel = wx.Panel(self)
-            box = wx.BoxSizer(wx.VERTICAL)
-
-            head = wx.StaticText(panel, -1, "Chome Tabs Test")
-            head.SetFont(wx.Font(14, wx.SWISS, wx.NORMAL, wx.BOLD))
-            box.Add(head, 0, wx.ALL, 10)
-
-            self.tctrl = wx.TextCtrl(panel, wx.ID_ANY, "Tab Name")
-
-            self.close_check = wx.CheckBox(panel, label="Closable?")
-            self.close_check.SetValue(True)
-
-            self.icon_check = wx.CheckBox(panel, label="Icon?")
-            self.icon_check.SetValue(True)
-
-            button = wx.Button(panel, wx.ID_ANY, "Create")
-            button.Bind(wx.EVT_BUTTON, self.OnCreate)
-
-            box.Add(self.tctrl, 0, wx.ALL, 5)
-            box.Add(self.close_check, 0, wx.ALL, 5)
-            box.Add(self.icon_check, 0, wx.ALL, 5)
-            box.Add(button, 0, wx.ALL, 10)
-
-            self.notebook.AddPage(panel, "Tab1", closeable=False)
-
-            # Add dummy pages
-            notebook2.AddPage()
-            notebook2.AddPage()
-
-            splitter.SplitVertically(self.notebook, notebook2)
-
-            panel.SetSizer(box)
-            panel.Layout()
-            self.SetSizer(main_sizer)
-
-        def OnCreate(self, event):
-            tab_name = self.tctrl.GetValue()
-            tab_icon = BitmapLoader.getImage("ship_small", "gui")
-            self.notebook.AddPage(
-                title=tab_name,
-                image=tab_icon if self.icon_check.GetValue() else None,
-                closeable=self.close_check.GetValue())
-
-    app = wx.App(redirect=False)   # Error messages go to popup window
-    top = Frame("Test Chrome Tabs")
-    top.Show()
-    app.MainLoop()

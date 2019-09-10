@@ -69,11 +69,14 @@ class StatsPane(wx.Panel):
             pyfalog.error("Unknown setting for view: {0}", aView)
 
     def fitChanged(self, event):
+        event.Skip()
+        activeFitID = self.mainFrame.getActiveFit()
+        if activeFitID is not None and activeFitID not in event.fitIDs:
+            return
         sFit = Fit.getInstance()
-        fit = sFit.getFit(event.fitID)
+        fit = sFit.getFit(activeFitID)
         for view in self.views:
             view.refreshPanel(fit)
-        event.Skip()
 
     def __init__(self, parent):
         wx.Panel.__init__(self, parent)
@@ -114,9 +117,7 @@ class StatsPane(wx.Panel):
             tp.SetLabel(view.getHeaderText(None))
             view.refreshPanel(None)
 
-            contentPanel.Bind(wx.EVT_RIGHT_DOWN, self.contextHandler(contentPanel))
-            for child in contentPanel.GetChildren():
-                child.Bind(wx.EVT_RIGHT_DOWN, self.contextHandler(contentPanel))
+            contentPanel.Bind(wx.EVT_CONTEXT_MENU, self.contextHandler(contentPanel, tp))
 
             mainSizer.Add(tp, 0, wx.EXPAND | wx.LEFT, 3)
             if i < maxviews - 1:
@@ -131,21 +132,25 @@ class StatsPane(wx.Panel):
         self.mainFrame = gui.mainFrame.MainFrame.getInstance()
         self.mainFrame.Bind(GE.FIT_CHANGED, self.fitChanged)
 
-    @staticmethod
-    def contextHandler(contentPanel):
+    def contextHandler(self, contentPanel, tp):
         viewName = contentPanel.viewName
 
         def handler(event):
-            menu = ContextMenu.getMenu(None, (viewName,))
+            menu = ContextMenu.getMenu(self, None, None, (viewName,))
+
             if menu is not None:
                 contentPanel.PopupMenu(menu)
 
             event.Skip()
 
-        return handler
+        if ContextMenu.hasMenu(self, None, None, (viewName,)):
+            sizer = tp.GetHeaderContentSizer()
+            sizer.AddStretchSpacer()
+            # Add menu
+            header_menu = wx.StaticText(tp.GetHeaderPanel(), wx.ID_ANY, "\u2630", size=wx.Size((10, -1)))
+            sizer.Add(header_menu , 0, wx.EXPAND | wx.RIGHT | wx.ALIGN_RIGHT, 5)
 
-    @staticmethod
-    def applyBinding(self, contentPanel):
-        pyfalog.debug("Attempt applyBinding to children of {0}", contentPanel.viewName)
-        for child in contentPanel.GetChildren():
-            child.Bind(wx.EVT_RIGHT_DOWN, self.contextHandler(contentPanel))
+            header_menu.Bind(wx.EVT_CONTEXT_MENU, handler)
+            header_menu.Bind(wx.EVT_LEFT_UP, handler)
+
+        return handler

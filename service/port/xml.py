@@ -23,18 +23,19 @@ import xml.parsers.expat
 
 from logbook import Logger
 
+from eos.const import FittingModuleState, FittingSlot
 from eos.saveddata.cargo import Cargo
 from eos.saveddata.citadel import Citadel
 from eos.saveddata.drone import Drone
 from eos.saveddata.fighter import Fighter
 from eos.saveddata.fit import Fit
-from eos.saveddata.module import Module, State, Slot
+from eos.saveddata.module import Module
 from eos.saveddata.ship import Ship
+from gui.fitCommands.helpers import activeStateLimit
 from service.fit import Fit as svcFit
 from service.market import Market
-from utils.strfunctions import sequential_rep, replace_ltgt
-
 from service.port.shared import IPortUser, processing_notify
+from utils.strfunctions import replace_ltgt, sequential_rep
 
 
 pyfalog = Logger(__name__)
@@ -46,8 +47,14 @@ L_MARK = "&lt;localized hint=&quot;"
 LOCALIZED_PATTERN = re.compile(r'<localized hint="([^"]+)">([^\*]+)\*</localized>')
 
 
+class ExtractingError(Exception):
+    pass
+
+
 def _extract_match(t):
     m = LOCALIZED_PATTERN.match(t)
+    if m is None:
+        raise ExtractingError
     # hint attribute, text content
     return m.group(1), m.group(2)
 
@@ -62,8 +69,11 @@ def _resolve_ship(fitting, sMkt, b_localized):
     shipType = fitting.getElementsByTagName("shipType").item(0).getAttribute("value")
     anything = None
     if b_localized:
-        # expect an official name, emergency cache
-        shipType, anything = _extract_match(shipType)
+        try:
+            # expect an official name, emergency cache
+            shipType, anything = _extract_match(shipType)
+        except ExtractingError:
+            pass
 
     limit = 2
     ship = None
@@ -106,8 +116,11 @@ def _resolve_module(hardware, sMkt, b_localized):
     moduleName = hardware.getAttribute("type")
     emergency = None
     if b_localized:
-        # expect an official name, emergency cache
-        moduleName, emergency = _extract_match(moduleName)
+        try:
+            # expect an official name, emergency cache
+            moduleName, emergency = _extract_match(moduleName)
+        except ExtractingError:
+            pass
 
     item = None
     limit = 2
@@ -198,8 +211,8 @@ def importXml(text, iportuser):
                             m.owner = fitobj
                             fitobj.modules.append(m)
                     else:
-                        if m.isValidState(State.ACTIVE):
-                            m.state = State.ACTIVE
+                        if m.isValidState(FittingModuleState.ACTIVE):
+                            m.state = activeStateLimit(m.item)
 
                         moduleList.append(m)
 
@@ -208,7 +221,9 @@ def importXml(text, iportuser):
                 continue
 
         # Recalc to get slot numbers correct for T3 cruisers
-        svcFit.getInstance().recalc(fitobj)
+        sFit = svcFit.getInstance()
+        sFit.recalc(fitobj)
+        sFit.fill(fitobj)
 
         for module in moduleList:
             if module.fits(fitobj):
@@ -225,14 +240,13 @@ def importXml(text, iportuser):
     return fit_list
 
 
-def exportXml(iportuser, *fits):
+def exportXml(fits, iportuser, callback):
     doc = xml.dom.minidom.Document()
     fittings = doc.createElement("fittings")
     # fit count
     fit_count = len(fits)
     fittings.setAttribute("count", "%s" % fit_count)
     doc.appendChild(fittings)
-    sFit = svcFit.getInstance()
 
     for i, fit in enumerate(fits):
         try:
@@ -266,7 +280,7 @@ def exportXml(iportuser, *fits):
 
                 slot = module.slot
 
-                if slot == Slot.SUBSYSTEM:
+                if slot == FittingSlot.SUBSYSTEM:
                     # Order of subsystem matters based on this attr. See GH issue #130
                     slotId = module.getModifiedItemAttr("subSystemSlot") - 125
                 else:
@@ -278,7 +292,7 @@ def exportXml(iportuser, *fits):
 
                 hardware = doc.createElement("hardware")
                 hardware.setAttribute("type", module.item.name)
-                slotName = Slot.getName(slot).lower()
+                slotName = FittingSlot(slot).name.lower()
                 slotName = slotName if slotName != "high" else "hi"
                 hardware.setAttribute("slot", "%s slot %d" % (slotName, slotId))
                 fitting.appendChild(hardware)
@@ -298,7 +312,7 @@ def exportXml(iportuser, *fits):
 
             for fighter in fit.fighters:
                 hardware = doc.createElement("hardware")
-                hardware.setAttribute("qty", "%d" % fighter.amountActive)
+                hardware.setAttribute("qty", "%d" % fighter.amount)
                 hardware.setAttribute("slot", "fighter bay")
                 hardware.setAttribute("type", fighter.item.name)
                 fitting.appendChild(hardware)
@@ -323,4 +337,9 @@ def exportXml(iportuser, *fits):
                     iportuser, IPortUser.PROCESS_EXPORT | IPortUser.ID_UPDATE,
                     (i, "convert to xml (%s/%s) %s" % (i + 1, fit_count, fit.ship.name))
                 )
-    return doc.toprettyxml()
+    text = doc.toprettyxml()
+
+    if callback:
+        callback(text)
+    else:
+        return text

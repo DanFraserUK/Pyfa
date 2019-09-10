@@ -1,7 +1,6 @@
 # noinspection PyPackageRequirements
 import wx
 from logbook import Logger
-# noinspection PyPackageRequirements
 
 import gui.globalEvents as GE
 import gui.mainFrame
@@ -97,11 +96,14 @@ class ShipBrowser(wx.Panel):
         self.navpanel.gotoStage(stage, stageData)
 
     def RefreshList(self, event):
-        stage = self.GetActiveStage()
+        event.Skip()
+        activeFitID = self.mainFrame.getActiveFit()
+        if activeFitID is not None and activeFitID not in event.fitIDs:
+            return
 
+        stage = self.GetActiveStage()
         if stage in (3, 4, 5):
             self.lpane.RefreshList(True)
-        event.Skip()
 
     def SizeRefreshList(self, event):
         self.Layout()
@@ -164,12 +166,12 @@ class ShipBrowser(wx.Panel):
             self.categoryList = list(sMkt.getShipRoot())
             self.categoryList.sort(key=lambda _ship: _ship.name)
 
+            counts = sFit.countAllFitsGroupedByShip()
+
             # set map & cache of fittings per category
             for cat in self.categoryList:
-                itemIDs = [x.ID for x in cat.items]
-                num = sFit.countFitsWithShip(itemIDs)
-                self.categoryFitCache[cat.ID] = num > 0
-
+                itemIDs = [x.ID for x in sMkt.getItemsByGroup(cat)]
+                self.categoryFitCache[cat.ID] = sum([count for shipID, count in counts if shipID in itemIDs]) > 0
         for ship in self.categoryList:
             if self.filterShipsWithNoFits and not self.categoryFitCache[ship.ID]:
                 continue

@@ -27,10 +27,11 @@ from logbook import Logger
 
 import config
 
-logging = Logger(__name__)
+
+pyfalog = Logger(__name__)
 
 
-class BitmapLoader(object):
+class BitmapLoader:
     # try:
     #     archive = zipfile.ZipFile(os.path.join(config.pyfaPath, 'imgs.zip'), 'r')
     #     logging.info("Using zipped image files.")
@@ -38,7 +39,7 @@ class BitmapLoader(object):
     #     logging.info("Using local image files.")
     #     archive = None
 
-    logging.info("Using local image files.")
+    pyfalog.info("Using local image files.")
     archive = None
 
     cached_bitmaps = OrderedDict()
@@ -49,8 +50,11 @@ class BitmapLoader(object):
 
     @classmethod
     def getStaticBitmap(cls, name, parent, location):
+        bitmap = cls.getBitmap(name or 0, location)
+        if bitmap is None:
+            return None
         static = wx.StaticBitmap(parent)
-        static.SetBitmap(cls.getBitmap(name or 0, location))
+        static.SetBitmap(bitmap)
         return static
 
     @classmethod
@@ -82,9 +86,7 @@ class BitmapLoader(object):
     @classmethod
     def loadBitmap(cls, name, location):
         if cls.scaling_factor is None:
-            import gui.mainFrame
-            cls.scaling_factor = int(gui.mainFrame.MainFrame.getInstance().GetContentScaleFactor())
-
+            cls.scaling_factor = int(wx.GetApp().GetTopWindow().GetContentScaleFactor())
         scale = cls.scaling_factor
 
         filename, img = cls.loadScaledBitmap(name, location, scale)
@@ -95,7 +97,7 @@ class BitmapLoader(object):
             filename, img = cls.loadScaledBitmap(name, location, scale)
 
         if img is None:
-            print(("Missing icon file: {0}/{1}".format(location, filename)))
+            pyfalog.warning("Missing icon file: {0}/{1}".format(location, filename))
             return None
 
         bmp: wx.Bitmap = img.ConvertToBitmap()
@@ -132,7 +134,7 @@ class BitmapLoader(object):
                 sbuf = io.StringIO(img_data)
                 return wx.ImageFromStream(sbuf)
             except KeyError:
-                print(("Missing icon file from zip: {0}".format(path)))
+                pyfalog.warning("Missing icon file from zip: {0}".format(path))
         else:
             path = os.path.join(config.pyfaPath, 'imgs' + os.sep + location + os.sep + filename)
 

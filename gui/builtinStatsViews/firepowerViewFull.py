@@ -19,11 +19,13 @@
 
 # noinspection PyPackageRequirements
 import wx
+
+import eos.config
 import gui.mainFrame
-from gui.statsView import StatsView
+from eos.utils.spoolSupport import SpoolOptions, SpoolType
 from gui.bitmap_loader import BitmapLoader
+from gui.statsView import StatsView
 from gui.utils.numberFormatter import formatAmount, roundToPrec
-from eos.utils.spoolSupport import SpoolType, SpoolOptions
 from service.fit import Fit
 
 
@@ -47,10 +49,10 @@ class FirepowerViewFull(StatsView):
         parent = self.panel = contentPanel
 
         self.headerPanel = headerPanel
-        hsizer = self.headerPanel.GetSizer()
+        hsizer = self.headerPanel.Parent.GetHeaderContentSizer()
         self.stEff = wx.StaticText(self.headerPanel, wx.ID_ANY, "( Effective )")
         hsizer.Add(self.stEff)
-        self.headerPanel.GetParent().AddToggleItem(self.stEff)
+        # self.headerPanel.GetParent().AddToggleItem(self.stEff)
 
         panel = "full"
 
@@ -144,7 +146,7 @@ class FirepowerViewFull(StatsView):
 
     def refreshPanel(self, fit):
         # If we did anything intresting, we'd update our labels to reflect the new fit's stats here
-        if fit is not None and fit.targetResists is not None:
+        if fit is not None and fit.targetProfile is not None:
             self.stEff.Show()
         else:
             self.stEff.Hide()
@@ -157,8 +159,7 @@ class FirepowerViewFull(StatsView):
                     formatAmount(preSpool, prec, lowest, highest),
                     formatAmount(fullSpool, prec, lowest, highest))
 
-        # TODO: fetch spoolup option
-        defaultSpoolValue = 1
+        defaultSpoolValue = eos.config.settings['globalDefaultSpoolupPercentage']
         stats = (
             (
                 "labelFullDpsWeapon",

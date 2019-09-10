@@ -36,7 +36,7 @@ class EntityEditor(wx.Panel):
     functions that get the list from the source, what to do when user does an action, and how to validate the input.
     """
 
-    def __init__(self, parent, entityName):
+    def __init__(self, parent, entityName, selected=None):
         wx.Panel.__init__(self, parent, id=wx.ID_ANY, style=wx.TAB_TRAVERSAL)
         self.entityName = entityName
         self.validator = None
@@ -70,7 +70,7 @@ class EntityEditor(wx.Panel):
         self.SetSizer(self.navSizer)
         self.Layout()
 
-        self.refreshEntityList()
+        self.refreshEntityList(selected=selected)
 
     def SetEditorValidator(self, validator=None):
         """ Sets validator class (not an instance of the class) """
@@ -97,58 +97,60 @@ class EntityEditor(wx.Panel):
         raise NotImplementedError()
 
     def OnNew(self, event):
-        dlg = TextEntryValidatedDialog(self, self.validator,
-                                       "Enter a name for your new {}:".format(self.entityName),
-                                       "New {}".format(self.entityName))
-        dlg.CenterOnParent()
+        with TextEntryValidatedDialog(
+            self, self.validator, "Enter a name for your new {}:".format(self.entityName),
+            "New {}".format(self.entityName)
+        ) as dlg:
+            dlg.CenterOnParent()
 
-        if dlg.ShowModal() == wx.ID_OK:
-            # using dlg.textctrl.GetValue instead of simply dlg.GetValue because the proper way does not work in wxPython 2.8
-            new = self.DoNew(dlg.txtctrl.GetValue().strip())
-            self.refreshEntityList(new)
-            wx.PostEvent(self.entityChoices, wx.CommandEvent(wx.wxEVT_COMMAND_CHOICE_SELECTED))
-        else:
-            return False
+            if dlg.ShowModal() == wx.ID_OK:
+                # using dlg.textctrl.GetValue instead of simply dlg.GetValue because the proper way does not work in wxPython 2.8
+                new = self.DoNew(dlg.txtctrl.GetValue().strip())
+                self.refreshEntityList(new)
+                wx.PostEvent(self.entityChoices, wx.CommandEvent(wx.wxEVT_COMMAND_CHOICE_SELECTED))
+            else:
+                return False
 
     def OnCopy(self, event):
-        dlg = TextEntryValidatedDialog(self, self.validator,
-                                       "Enter a name for your {} copy:".format(self.entityName),
-                                       "Copy {}".format(self.entityName))
-        active = self.getActiveEntity()
-        dlg.SetValue("{} Copy".format(active.name))
-        dlg.txtctrl.SetInsertionPointEnd()
-        dlg.CenterOnParent()
+        with TextEntryValidatedDialog(
+            self, self.validator, "Enter a name for your {} copy:".format(self.entityName),
+            "Copy {}".format(self.entityName)
+        ) as dlg:
+            active = self.getActiveEntity()
+            dlg.SetValue("{} Copy".format(active.name))
+            dlg.txtctrl.SetInsertionPointEnd()
+            dlg.CenterOnParent()
 
-        if dlg.ShowModal() == wx.ID_OK:
-            copy = self.DoCopy(active, dlg.txtctrl.GetValue().strip())
-            self.refreshEntityList(copy)
-            wx.PostEvent(self.entityChoices, wx.CommandEvent(wx.wxEVT_COMMAND_CHOICE_SELECTED))
+            if dlg.ShowModal() == wx.ID_OK:
+                copy = self.DoCopy(active, dlg.txtctrl.GetValue().strip())
+                self.refreshEntityList(copy)
+                wx.PostEvent(self.entityChoices, wx.CommandEvent(wx.wxEVT_COMMAND_CHOICE_SELECTED))
 
     def OnRename(self, event):
-        dlg = TextEntryValidatedDialog(self, self.validator,
-                                       "Enter a new name for your {}:".format(self.entityName),
-                                       "Rename {}".format(self.entityName))
-        active = self.getActiveEntity()
-        dlg.SetValue(active.name)
-        dlg.txtctrl.SetInsertionPointEnd()
-        dlg.CenterOnParent()
+        with TextEntryValidatedDialog(
+            self, self.validator, "Enter a new name for your {}:".format(self.entityName),
+            "Rename {}".format(self.entityName)
+        ) as dlg:
+            active = self.getActiveEntity()
+            dlg.SetValue(active.name)
+            dlg.txtctrl.SetInsertionPointEnd()
+            dlg.CenterOnParent()
 
-        if dlg.ShowModal() == wx.ID_OK:
-            self.DoRename(active, dlg.txtctrl.GetValue().strip())
-            self.refreshEntityList(active)
-            wx.PostEvent(self.entityChoices, wx.CommandEvent(wx.wxEVT_COMMAND_CHOICE_SELECTED))
+            if dlg.ShowModal() == wx.ID_OK:
+                self.DoRename(active, dlg.txtctrl.GetValue().strip())
+                self.refreshEntityList(active)
+                wx.PostEvent(self.entityChoices, wx.CommandEvent(wx.wxEVT_COMMAND_CHOICE_SELECTED))
 
     def OnDelete(self, event):
-        dlg = wx.MessageDialog(self,
-                               "Do you really want to delete the {} {}?".format(self.getActiveEntity().name,
-                                                                                self.entityName),
-                               "Confirm Delete", wx.YES | wx.NO | wx.ICON_QUESTION)
-        dlg.CenterOnParent()
-
-        if dlg.ShowModal() == wx.ID_YES:
-            self.DoDelete(self.getActiveEntity())
-            self.refreshEntityList()
-            wx.PostEvent(self.entityChoices, wx.CommandEvent(wx.wxEVT_COMMAND_CHOICE_SELECTED))
+        with wx.MessageDialog(
+            self, "Do you really want to delete the {} {}?".format(self.getActiveEntity().name, self.entityName),
+            "Confirm Delete", wx.YES | wx.NO | wx.ICON_QUESTION
+        ) as dlg:
+            dlg.CenterOnParent()
+            if dlg.ShowModal() == wx.ID_YES:
+                self.DoDelete(self.getActiveEntity())
+                self.refreshEntityList()
+                wx.PostEvent(self.entityChoices, wx.CommandEvent(wx.wxEVT_COMMAND_CHOICE_SELECTED))
 
     def refreshEntityList(self, selected=None):
         self.choices = self.getEntitiesFromContext()
@@ -168,7 +170,12 @@ class EntityEditor(wx.Panel):
         return self.choices[self.entityChoices.GetSelection()]
 
     def setActiveEntity(self, entity):
-        self.entityChoices.SetSelection(self.choices.index(entity))
+        try:
+            idx = self.choices.index(entity)
+        except IndexError:
+            return False
+        self.entityChoices.SetSelection(idx)
+        return True
 
     def checkEntitiesExist(self):
         if len(self.choices) == 0:

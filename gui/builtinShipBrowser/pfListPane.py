@@ -22,6 +22,7 @@ import wx
 
 
 class PFListPane(wx.ScrolledWindow):
+
     def __init__(self, parent):
         wx.ScrolledWindow.__init__(self, parent, pos=wx.DefaultPosition, style=wx.TAB_TRAVERSAL)
 
@@ -148,7 +149,12 @@ class PFListPane(wx.ScrolledWindow):
             self._wList[i].SetSize((cwidth, iheight))
             if doRefresh is True:
                 self._wList[i].Refresh()
-            self.itemsHeight = max(self.itemsHeight, iheight - 1)
+            self.itemsHeight = iheight
+
+        # This is needed as under GTK wx does not emit scroll up/scroll down
+        # events, see issue #1909 for more info
+        if 'wxGTK' in wx.PlatformInfo:
+            self.SetScrollRate(0, self.itemsHeight)
 
     def RemoveWidget(self, child):
         child.Destroy()
@@ -158,4 +164,5 @@ class PFListPane(wx.ScrolledWindow):
         for widget in self._wList:
             widget.Destroy()
 
+        self.Scroll(0, 0)
         self._wList = []

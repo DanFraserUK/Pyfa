@@ -1,25 +1,25 @@
 # noinspection PyPackageRequirements
 import wx
-from gui.contextMenu import ContextMenu
+
 import gui.mainFrame
-import gui.globalEvents as GE
+from gui import fitCommands as cmd
+from gui.contextMenu import ContextMenuSingle
 from service.fit import Fit
-from service.settings import ContextMenuSettings
 
 
-class BoosterSideEffect(ContextMenu):
+class BoosterSideEffects(ContextMenuSingle):
+
     def __init__(self):
         self.mainFrame = gui.mainFrame.MainFrame.getInstance()
-        self.settings = ContextMenuSettings.getInstance()
 
-    def display(self, srcContext, selection):
-        # if not self.settings.get('fighterAbilities'):
-        #     return False
-
+    def display(self, callingWindow, srcContext, mainItem):
         if self.mainFrame.getActiveFit() is None or srcContext not in "boosterItem":
             return False
 
-        self.booster = selection[0]
+        if mainItem is None:
+            return False
+
+        self.booster = mainItem
 
         for effect in self.booster.sideEffects:
             if effect.effect.isImplemented:
@@ -27,19 +27,19 @@ class BoosterSideEffect(ContextMenu):
 
         return False
 
-    def getText(self, itmContext, selection):
+    def getText(self, callingWindow, itmContext, mainItem):
         return "Side Effects"
 
     def addEffect(self, menu, ability):
         label = ability.name
-        id = ContextMenu.nextID()
+        id = ContextMenuSingle.nextID()
         self.effectIds[id] = ability
 
         menuItem = wx.MenuItem(menu, id, label, kind=wx.ITEM_CHECK)
         menu.Bind(wx.EVT_MENU, self.handleMode, menuItem)
         return menuItem
 
-    def getSubMenu(self, context, selection, rootMenu, i, pitem):
+    def getSubMenu(self, callingWindow, context, mainItem, rootMenu, i, pitem):
         msw = True if "wxMSW" in wx.PlatformInfo else False
         self.context = context
         self.effectIds = {}
@@ -57,14 +57,17 @@ class BoosterSideEffect(ContextMenu):
 
     def handleMode(self, event):
         effect = self.effectIds[event.Id]
-        if effect is False or effect not in self.booster.sideEffects:
+        booster = self.booster
+        if effect is False or effect not in booster.sideEffects:
             event.Skip()
             return
 
-        sFit = Fit.getInstance()
         fitID = self.mainFrame.getActiveFit()
-        sFit.toggleBoosterSideEffect(fitID, effect)
-        wx.PostEvent(self.mainFrame, GE.FitChanged(fitID=fitID))
+        fit = Fit.getInstance().getFit(fitID)
+        if booster in fit.boosters:
+            index = fit.boosters.index(booster)
+            self.mainFrame.command.Submit(cmd.GuiToggleBoosterSideEffectStateCommand(
+                fitID=fitID, position=index, effectID=effect.effectID))
 
 
-BoosterSideEffect.register()
+BoosterSideEffects.register()

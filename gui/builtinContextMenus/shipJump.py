@@ -1,34 +1,41 @@
 # noinspection PyPackageRequirements
 import wx
-from gui.contextMenu import ContextMenu
+
 import gui.mainFrame
 from gui.builtinShipBrowser.events import Stage3Selected
+from gui.contextMenu import ContextMenuUnconditional
 from service.fit import Fit
-from service.settings import ContextMenuSettings
 
 
-class ShipJump(ContextMenu):
+class JumpToShip(ContextMenuUnconditional):
+
     def __init__(self):
         self.mainFrame = gui.mainFrame.MainFrame.getInstance()
-        self.settings = ContextMenuSettings.getInstance()
 
-    def display(self, srcContext, selection):
-        if not self.settings.get('shipJump'):
+    def display(self, callingWindow, srcContext):
+        if srcContext != "fittingShip":
             return False
+        fitTabSelected = self.mainFrame.notebookBrowsers.GetSelection() == 1
+        if not fitTabSelected:
+            return True
+        browsingStage = self.mainFrame.shipBrowser.GetActiveStage()
+        if browsingStage != 3:
+            return True
+        fitID = self.mainFrame.getActiveFit()
+        ship = Fit.getInstance().getFit(fitID).ship
+        browsingShipID = self.mainFrame.shipBrowser.GetStageData(browsingStage)
+        if browsingShipID != ship.item.ID:
+            return True
+        return False
 
-        return srcContext == "fittingShip"
-
-    def getText(self, itmContext, selection):
+    def getText(self, callingWindow, itmContext):
         return "Open in Fitting Browser"
 
-    def activate(self, fullContext, selection, i):
+    def activate(self, callingWindow, fullContext, i):
         fitID = self.mainFrame.getActiveFit()
-        sFit = Fit.getInstance()
-        stuff = sFit.getFit(fitID).ship
-        groupID = stuff.item.group.ID
-
+        ship = Fit.getInstance().getFit(fitID).ship
         self.mainFrame.notebookBrowsers.SetSelection(1)
-        wx.PostEvent(self.mainFrame.shipBrowser, Stage3Selected(shipID=stuff.item.ID, back=groupID))
+        wx.PostEvent(self.mainFrame.shipBrowser, Stage3Selected(shipID=ship.item.ID, back=True))
 
 
-ShipJump.register()
+JumpToShip.register()

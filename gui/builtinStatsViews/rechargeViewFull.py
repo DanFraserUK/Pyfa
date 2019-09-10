@@ -19,11 +19,12 @@
 
 # noinspection PyPackageRequirements
 import wx
-from gui.statsView import StatsView
-from gui.bitmap_loader import BitmapLoader
-from gui.utils.numberFormatter import formatAmount
+
+import gui.globalEvents as GE
 import gui.mainFrame
-from gui.builtinStatsViews.resistancesViewFull import EFFECTIVE_HP_TOGGLED
+from gui.bitmap_loader import BitmapLoader
+from gui.statsView import StatsView
+from gui.utils.numberFormatter import formatAmount
 from service.fit import Fit
 
 
@@ -34,7 +35,7 @@ class RechargeViewFull(StatsView):
         StatsView.__init__(self)
         self.parent = parent
         self.mainFrame = gui.mainFrame.MainFrame.getInstance()
-        self.mainFrame.Bind(EFFECTIVE_HP_TOGGLED, self.toggleEffective)
+        self.mainFrame.Bind(GE.EFFECTIVE_HP_TOGGLED, self.toggleEffective)
         self.effective = True
 
     def getHeaderText(self, fit):
@@ -45,10 +46,10 @@ class RechargeViewFull(StatsView):
         return width
 
     def toggleEffective(self, event):
+        event.Skip()
         self.effective = event.effective
         sFit = Fit.getInstance()
         self.refreshPanel(sFit.getFit(self.mainFrame.getActiveFit()))
-        event.Skip()
 
     def populatePanel(self, contentPanel, headerPanel):
         contentSizer = contentPanel.GetSizer()

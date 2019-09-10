@@ -140,7 +140,7 @@ class SearchWorkerThread(threading.Thread):
         self.cv.release()
 
 
-class Market(object):
+class Market:
     instance = None
 
     def __init__(self):
@@ -260,12 +260,12 @@ class Market(object):
         # Dictionary of items with forced meta groups, uses following format:
         # Item name: (metagroup name, parent type name)
         self.ITEMS_FORCEDMETAGROUP = {
-            "'Habitat' Miner I"                        : ("Storyline", "Miner I"),
-            "'Wild' Miner I"                           : ("Storyline", "Miner I"),
-            "Medium Nano Armor Repair Unit I"          : ("Tech I", "Medium Armor Repairer I"),
+            "'Habitat' Miner I": ("Storyline", "Miner I"),
+            "'Wild' Miner I": ("Storyline", "Miner I"),
+            "Medium Nano Armor Repair Unit I": ("Tech I", "Medium Armor Repairer I"),
             "Large 'Reprieve' Vestment Reconstructer I": ("Storyline", "Large Armor Repairer I"),
-            "Khanid Navy Torpedo Launcher"             : ("Faction", "Torpedo Launcher I"),
-        }
+            "Khanid Navy Torpedo Launcher": ("Faction", "Torpedo Launcher I"),
+            "Dark Blood Tracking Disruptor": ("Faction", "Tracking Disruptor I")}
         # Parent type name: set(item names)
         self.ITEMS_FORCEDMETAGROUP_R = {}
         for item, value in list(self.ITEMS_FORCEDMETAGROUP.items()):
@@ -305,9 +305,10 @@ class Market(object):
         self.ITEMS_FORCEDMARKETGROUP_R = self.__makeRevDict(self.ITEMS_FORCEDMARKETGROUP)
 
         self.FORCEDMARKETGROUP = {
-            685: False,  # Ship Equipment > Electronic Warfare > ECCM
-            681: False,  # Ship Equipment > Electronic Warfare > Sensor Backup Arrays
-            1639: False  # Ship Equipment > Fleet Assistance > Command Processors
+            685: False,   # Ship Equipment > Electronic Warfare > ECCM
+            681: False,   # Ship Equipment > Electronic Warfare > Sensor Backup Arrays
+            1639: False,  # Ship Equipment > Fleet Assistance > Command Processors
+            2527: True,   # Ship Equipment > Hull & Armor > Mutadaptive Remote Armor Repairers - has hasTypes set to 1 while actually having no types
         }
 
         # Misc definitions
@@ -316,6 +317,7 @@ class Market(object):
                                      ("faction", frozenset((4, 3))),
                                      ("complex", frozenset((6,))),
                                      ("officer", frozenset((5,)))])
+        self.META_MAP_REVERSE = {sv: k for k, v in self.META_MAP.items() for sv in v}
         self.SEARCH_CATEGORIES = (
             "Drone",
             "Module",
@@ -327,17 +329,18 @@ class Market(object):
             "Structure",
             "Structure Module",
         )
-        self.SEARCH_GROUPS = ("Ice Product",)
-        self.ROOT_MARKET_GROUPS = (9,  # Modules
+        self.SEARCH_GROUPS = ("Ice Product", "Cargo Container", "Secure Cargo Container", "Audit Log Secure Container", "Freight Container")
+        self.ROOT_MARKET_GROUPS = (9,  # Ship Equipment
                                    1111,  # Rigs
                                    157,  # Drones
-                                   11,  # Ammo
+                                   11,  # Ammunition & Charges
                                    1112,  # Subsystems
                                    24,  # Implants & Boosters
-                                   404,  # Deployables
+                                   404,  # Deployable Structures
                                    2202,  # Structure Equipment
                                    2203  # Structure Modifications
                                    )
+        self.SHOWN_MARKET_GROUPS = eos.db.getMarketTreeNodeIds(self.ROOT_MARKET_GROUPS)
         # Tell other threads that Market is at their service
         mktRdy.set()
 
@@ -487,15 +490,21 @@ class Market(object):
         # Check if we force market group for given item
         if item.name in self.ITEMS_FORCEDMARKETGROUP:
             mgid = self.ITEMS_FORCEDMARKETGROUP[item.name]
-            return self.getMarketGroup(mgid)
+            if mgid in self.SHOWN_MARKET_GROUPS:
+                return self.getMarketGroup(mgid)
+            else:
+                return None
         # Check if item itself has market group
         elif item.marketGroupID:
-            return item.marketGroup
+            if item.marketGroupID in self.SHOWN_MARKET_GROUPS:
+                return item.marketGroup
+            else:
+                return None
         elif parentcheck:
             # If item doesn't have marketgroup, check if it has parent
             # item and use its market group
             parent = self.getParentItemByItem(item, selfparent=False)
-            if parent:
+            if parent and parent.marketGroupID in self.SHOWN_MARKET_GROUPS:
                 return parent.marketGroup
             else:
                 return None
@@ -793,5 +802,42 @@ class Market(object):
 
     def filterItemsByMeta(self, items, metas):
         """Filter items by meta lvl"""
-        filtered = set([item for item in items if self.getMetaGroupIdByItem(item) in metas])
+        filtered = [item for item in items if self.getMetaGroupIdByItem(item) in metas]
         return filtered
+
+    def getReplacements(self, identity):
+        item = self.getItem(identity)
+        # We already store needed type IDs in database
+        replTypeIDs = {int(i) for i in item.replacements.split(",") if i}
+        if not replTypeIDs:
+            return ()
+        # As replacements were generated without keeping track which items were published,
+        # filter them out here
+        items = []
+        for typeID in replTypeIDs:
+            item = self.getItem(typeID)
+            if not item:
+                continue
+            if self.getPublicityByItem(item):
+                items.append(item)
+        return items
+
+    def getRecentlyUsed(self):
+        recentlyUsedItems = []
+        for itemID in self.serviceMarketRecentlyUsedModules["pyfaMarketRecentlyUsedModules"]:
+            item = self.getItem(itemID)
+            if item is None:
+                self.serviceMarketRecentlyUsedModules["pyfaMarketRecentlyUsedModules"].remove(itemID)
+            recentlyUsedItems.append(item)
+        return recentlyUsedItems
+
+    def storeRecentlyUsed(self, itemID):
+        recentlyUsedModules = self.serviceMarketRecentlyUsedModules["pyfaMarketRecentlyUsedModules"]
+        while itemID in recentlyUsedModules:
+            recentlyUsedModules.remove(itemID)
+        item = self.getItem(itemID)
+        if item.isAbyssal:
+            return
+        while len(recentlyUsedModules) >= 20:
+            recentlyUsedModules.pop(-1)
+        recentlyUsedModules.insert(0, itemID)

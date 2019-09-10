@@ -22,8 +22,8 @@ import wx
 from gui.statsView import StatsView
 from gui.bitmap_loader import BitmapLoader
 from gui.utils.numberFormatter import formatAmount
-from service.price import Price
-from service.settings import PriceMenuSettings
+from service.price import Fit, Price
+from service.settings import MarketPriceSettings
 
 
 class PriceViewFull(StatsView):
@@ -32,7 +32,7 @@ class PriceViewFull(StatsView):
     def __init__(self, parent):
         StatsView.__init__(self)
         self.parent = parent
-        self.settings = PriceMenuSettings.getInstance()
+        self.settings = MarketPriceSettings.getInstance()
 
     def getHeaderText(self, fit):
         return "Price"
@@ -51,7 +51,7 @@ class PriceViewFull(StatsView):
 
         gridPrice = wx.GridSizer(2, 3, 0, 0)
         contentSizer.Add(gridPrice, 0, wx.EXPAND | wx.ALL, 0)
-        for _type in ("ship", "fittings", "total", "drones", "cargoBay", "character"):
+        for _type in ("ship", "fittings", "character", "drones", "cargoBay", "total"):
             if _type in "ship":
                 image = "ship_big"
             elif _type in ("fittings", "total"):
@@ -79,11 +79,8 @@ class PriceViewFull(StatsView):
     def refreshPanel(self, fit):
         if fit is not None:
             self.fit = fit
-
-            fit_items = Price.fitItemsList(fit)
-
-            sPrice = Price.getInstance()
-            sPrice.getPrices(fit_items, self.processPrices)
+            fit_items = set(Fit.fitItemIter(fit))
+            Price.getInstance().getPrices(fit_items, self.processPrices, fetchTimeout=30)
             self.labelEMStatus.SetLabel("Updating prices...")
 
         self.refreshPanelPrices(fit)
@@ -113,7 +110,7 @@ class PriceViewFull(StatsView):
 
             if fit.fighters:
                 for fighter in fit.fighters:
-                    fighter_price += fighter.item.price.price * fighter.amountActive
+                    fighter_price += fighter.item.price.price * fighter.amount
 
             if fit.cargo:
                 for cargo in fit.cargo:
@@ -123,16 +120,13 @@ class PriceViewFull(StatsView):
                 for booster in fit.boosters:
                     booster_price += booster.item.price.price
 
-            if fit.implants:
-                for implant in fit.implants:
+            if fit.appliedImplants:
+                for implant in fit.appliedImplants:
                     implant_price += implant.item.price.price
 
         total_price = 0
-
-        if self.settings.get("ship"):
-            total_price += ship_price
-        if self.settings.get("modules"):
-            total_price += module_price
+        total_price += ship_price
+        total_price += module_price
         if self.settings.get("drones"):
             total_price += drone_price + fighter_price
         if self.settings.get("cargo"):
@@ -141,23 +135,22 @@ class PriceViewFull(StatsView):
             total_price += booster_price + implant_price
 
         self.labelPriceShip.SetLabel("%s ISK" % formatAmount(ship_price, 3, 3, 9, currency=True))
-        self.labelPriceShip.SetToolTip(wx.ToolTip('{:,.2f}'.format(ship_price)))
+        self.labelPriceShip.SetToolTip(wx.ToolTip('{:,.2f} ISK'.format(ship_price)))
 
         self.labelPriceFittings.SetLabel("%s ISK" % formatAmount(module_price, 3, 3, 9, currency=True))
-        self.labelPriceFittings.SetToolTip(wx.ToolTip('{:,.2f}'.format(module_price)))
-
-        self.labelPriceTotal.SetLabel("%s ISK" % formatAmount(total_price, 3, 3, 9, currency=True))
-        self.labelPriceTotal.SetToolTip(wx.ToolTip('{:,.2f}'.format(total_price)))
+        self.labelPriceFittings.SetToolTip(wx.ToolTip('{:,.2f} ISK'.format(module_price)))
 
         self.labelPriceDrones.SetLabel("%s ISK" % formatAmount(drone_price + fighter_price, 3, 3, 9, currency=True))
-        self.labelPriceDrones.SetToolTip(wx.ToolTip('{:,.2f}'.format(drone_price + fighter_price)))
+        self.labelPriceDrones.SetToolTip(wx.ToolTip('{:,.2f} ISK'.format(drone_price + fighter_price)))
 
         self.labelPriceCargobay.SetLabel("%s ISK" % formatAmount(cargo_price, 3, 3, 9, currency=True))
-        self.labelPriceCargobay.SetToolTip(wx.ToolTip('{:,.2f}'.format(cargo_price)))
+        self.labelPriceCargobay.SetToolTip(wx.ToolTip('{:,.2f} ISK'.format(cargo_price)))
 
-        self.labelPriceCharacter.SetLabel(
-            "%s ISK" % formatAmount(booster_price + implant_price, 3, 3, 9, currency=True))
-        self.labelPriceCharacter.SetToolTip(wx.ToolTip('{:,.2f}'.format(booster_price + implant_price)))
+        self.labelPriceCharacter.SetLabel("%s ISK" % formatAmount(booster_price + implant_price, 3, 3, 9, currency=True))
+        self.labelPriceCharacter.SetToolTip(wx.ToolTip('{:,.2f} ISK'.format(booster_price + implant_price)))
+
+        self.labelPriceTotal.SetLabel("%s ISK" % formatAmount(total_price, 3, 3, 9, currency=True))
+        self.labelPriceTotal.SetToolTip(wx.ToolTip('{:,.2f} ISK'.format(total_price)))
 
     def processPrices(self, prices):
         self.refreshPanelPrices(self.fit)

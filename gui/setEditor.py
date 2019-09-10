@@ -17,14 +17,16 @@
 # along with pyfa.    If not, see <http://www.gnu.org/licenses/>.
 # =============================================================================
 
-from logbook import Logger
 # noinspection PyPackageRequirements
 import wx
+from logbook import Logger
 
-from service.implantSet import ImplantSets
+from gui.auxFrame import AuxiliaryFrame
+from gui.builtinViews.entityEditor import BaseValidator, EntityEditor
 from gui.builtinViews.implantEditor import BaseImplantEditorView
-from gui.utils.clipboard import toClipboard, fromClipboard
-from gui.builtinViews.entityEditor import EntityEditor, BaseValidator
+from gui.utils.clipboard import fromClipboard, toClipboard
+from service.implantSet import ImplantSets
+
 
 pyfalog = Logger(__name__)
 
@@ -83,7 +85,8 @@ class ImplantSetEntityEditor(EntityEditor):
         sIS.deleteSet(entity)
 
 
-class ImplantSetEditor(BaseImplantEditorView):
+class ImplantSetEditorView(BaseImplantEditorView):
+
     def __init__(self, parent):
         BaseImplantEditorView.__init__(self, parent)
         if 'wxMSW' in wx.PlatformInfo:
@@ -112,9 +115,12 @@ class ImplantSetEditor(BaseImplantEditorView):
         sIS.removeImplant(set_.ID, implant)
 
 
-class ImplantSetEditorDlg(wx.Dialog):
+class ImplantSetEditor(AuxiliaryFrame):
+
     def __init__(self, parent):
-        wx.Dialog.__init__(self, parent, id=wx.ID_ANY, title="Implant Set Editor", size=wx.Size(640, 600))
+        super().__init__(
+            parent, id=wx.ID_ANY, title="Implant Set Editor", resizeable=True,
+            size=wx.Size(950, 500) if "wxGTK" in wx.PlatformInfo else wx.Size(850, 420))
 
         self.block = False
         self.SetSizeHints(wx.DefaultSize, wx.DefaultSize)
@@ -127,7 +133,7 @@ class ImplantSetEditorDlg(wx.Dialog):
         self.sl = wx.StaticLine(self)
         mainSizer.Add(self.sl, 0, wx.EXPAND | wx.TOP | wx.BOTTOM, 5)
 
-        self.iview = ImplantSetEditor(self)
+        self.iview = ImplantSetEditorView(self)
         mainSizer.Add(self.iview, 1, wx.ALL | wx.EXPAND, 5)
 
         self.slfooter = wx.StaticLine(self)
@@ -138,11 +144,6 @@ class ImplantSetEditorDlg(wx.Dialog):
         self.stNotice = wx.StaticText(self, wx.ID_ANY, "")
         self.stNotice.Wrap(-1)
         footerSizer.Add(self.stNotice, 1, wx.BOTTOM | wx.TOP | wx.LEFT, 5)
-
-        if "wxGTK" in wx.PlatformInfo:
-            self.closeBtn = wx.Button(self, wx.ID_ANY, "Close", wx.DefaultPosition, wx.DefaultSize, 0)
-            mainSizer.Add(self.closeBtn, 0, wx.ALL | wx.ALIGN_RIGHT, 5)
-            self.closeBtn.Bind(wx.EVT_BUTTON, self.closeEvent)
 
         importExport = (("Import", wx.ART_FILE_OPEN, "from"),
                         ("Export", wx.ART_FILE_SAVE_AS, "to"))
@@ -166,24 +167,30 @@ class ImplantSetEditorDlg(wx.Dialog):
         self.Layout()
 
         if not self.entityEditor.checkEntitiesExist():
-            self.Destroy()
+            self.Close()
             return
 
         self.Bind(wx.EVT_CHOICE, self.entityChanged)
+        self.Bind(wx.EVT_CHAR_HOOK, self.kbEvent)
 
         self.Import.Bind(wx.EVT_BUTTON, self.importPatterns)
         self.Export.Bind(wx.EVT_BUTTON, self.exportPatterns)
 
+        self.SetMinSize(self.GetSize())
         self.CenterOnParent()
-        self.ShowModal()
 
     def entityChanged(self, event):
         if not self.entityEditor.checkEntitiesExist():
-            self.Destroy()
+            self.Close()
             return
 
-    def closeEvent(self, event):
-        self.Destroy()
+    def kbEvent(self, event):
+        keycode = event.GetKeyCode()
+        mstate = wx.GetMouseState()
+        if keycode == wx.WXK_ESCAPE and mstate.GetModifiers() == wx.MOD_NONE:
+            self.Close()
+            return
+        event.Skip()
 
     def __del__(self):
         pass

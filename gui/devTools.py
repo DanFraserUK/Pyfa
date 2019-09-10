@@ -17,24 +17,30 @@
 # along with pyfa.    If not, see <http://www.gnu.org/licenses/>.
 # =============================================================================
 
+import gc
+import threading
+import time
+
 # noinspection PyPackageRequirements
 import wx
 from logbook import Logger
-import gc
-import eos
-import time
-import threading
+
+import eos.db
+from gui.auxFrame import AuxiliaryFrame
 from gui.builtinShipBrowser.events import FitSelected
 
 
 pyfalog = Logger(__name__)
 
 
-class DevTools(wx.Dialog):
+class DevTools(AuxiliaryFrame):
+
     DAMAGE_TYPES = ("em", "thermal", "kinetic", "explosive")
 
     def __init__(self, parent):
-        wx.Dialog.__init__(self, parent, id=wx.ID_ANY, title="Damage Pattern Editor", size=wx.Size(400, 240))
+        super().__init__(
+            parent, id=wx.ID_ANY, title="Development Tools", resizeable=True,
+            size=wx.Size(400, 320) if "wxGTK" in wx.PlatformInfo else wx.Size(400, 240))
         self.mainFrame = parent
         self.block = False
         self.SetSizeHints(wx.DefaultSize, wx.DefaultSize)
@@ -67,8 +73,7 @@ class DevTools(wx.Dialog):
 
         self.Layout()
         self.CenterOnParent()
-        self.Show()
-        print(parent)
+        self.SetMinSize(self.GetSize())
 
     def objects_by_id(self, evt):
         input = self.id_get.GetValue()

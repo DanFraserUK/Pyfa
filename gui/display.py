@@ -25,6 +25,7 @@ from gui.cachingImageList import CachingImageList
 
 
 class Display(wx.ListCtrl):
+
     DEFAULT_COLS = None
 
     def __init__(self, parent, size=wx.DefaultSize, style=0):
@@ -39,36 +40,11 @@ class Display(wx.ListCtrl):
 
         self.mainFrame = gui.mainFrame.MainFrame.getInstance()
 
-        i = 0
-        for colName in self.DEFAULT_COLS:
-            if ":" in colName:
-                colName, params = colName.split(":", 1)
-                params = params.split(",")
-                colClass = ViewColumn.getColumn(colName)
-                paramList = colClass.getParameters()
-                paramDict = {}
-                for x, param in enumerate(paramList):
-                    name, type, defaultValue = param
-                    value = params[x] if len(params) > x else defaultValue
-                    value = value if value != "" else defaultValue
-                    if type == bool and isinstance(value, str):
-                        value = bool(value) if value.lower() != "false" and value != "0" else False
-                    paramDict[name] = value
-                col = colClass(self, paramDict)
-            else:
-                col = ViewColumn.getColumn(colName)(self, None)
-
-            self.addColumn(i, col)
-            self.columnsMinWidth.append(self.GetColumnWidth(i))
-            i += 1
-
-        info = wx.ListItem()
-        # noinspection PyPropertyAccess
-        info.m_mask = wx.LIST_MASK_WIDTH
-        self.InsertColumn(i, info)
-        self.SetColumnWidth(i, 0)
+        for i, colName in enumerate(self.DEFAULT_COLS):
+            self.insertColumnBySpec(i, colName)
 
         self.imageListBase = self.imageList.ImageCount
+
 
     # Override native HitTestSubItem (doesn't work as it should on GTK)
     # Source: ObjectListView
@@ -113,8 +89,9 @@ class Display(wx.ListCtrl):
     def addColumn(self, i, col):
         self.activeColumns.append(col)
         info = wx.ListItem()
-        info.SetMask(col.mask | wx.LIST_MASK_FORMAT | wx.LIST_MASK_WIDTH)
-        info.SetImage(col.imageId)
+        info.SetMask(col.mask | wx.LIST_MASK_FORMAT)
+        if col.imageId not in (None, -1):
+            info.SetImage(col.imageId)
         info.SetText(col.columnText)
         info.SetWidth(-1)
         info.SetAlign(wx.LIST_FORMAT_LEFT)
@@ -123,6 +100,36 @@ class Display(wx.ListCtrl):
         if i == 0 and col.size != wx.LIST_AUTOSIZE_USEHEADER:
             col.size += 4
         self.SetColumnWidth(i, col.size)
+
+    def appendColumnBySpec(self, colSpec):
+        self.insertColumnBySpec(len(self.activeColumns), colSpec)
+
+    def insertColumnBySpec(self, i, colSpec):
+        if ":" in colSpec:
+            colSpec, params = colSpec.split(":", 1)
+            params = params.split(",")
+            colClass = ViewColumn.getColumn(colSpec)
+            paramList = colClass.getParameters()
+            paramDict = {}
+            for x, param in enumerate(paramList):
+                name, type, defaultValue = param
+                value = params[x] if len(params) > x else defaultValue
+                value = value if value != "" else defaultValue
+                if type == bool and isinstance(value, str):
+                    value = bool(value) if value.lower() != "false" and value != "0" else False
+                paramDict[name] = value
+            col = colClass(self, paramDict)
+        else:
+            col = ViewColumn.getColumn(colSpec)(self, None)
+
+        self.addColumn(i, col)
+        self.columnsMinWidth.append(self.GetColumnWidth(i))
+
+    def removeColumn(self, col):
+        i = self.getColIndex(type(col))
+        del self.activeColumns[i]
+        del self.columnsMinWidth[i]
+        self.DeleteColumn(i)
 
     def getColIndex(self, colClass):
         for i, col in enumerate(self.activeColumns):
@@ -167,14 +174,17 @@ class Display(wx.ListCtrl):
 
         return lastFound
 
-    def deselectItems(self):
+    def unselectAll(self):
         sel = self.GetFirstSelected()
         while sel != -1:
-            self.SetItemState(sel, 0, wx.LIST_STATE_SELECTED | wx.LIST_STATE_FOCUSED)
+            self.Select(sel, False)
             sel = self.GetNextSelected(sel)
 
-    def populate(self, stuff):
+    def selectAll(self):
+        for row in range(self.GetItemCount()):
+            self.Select(row, True)
 
+    def populate(self, stuff):
         if stuff is not None:
             listItemCount = self.GetItemCount()
             stuffItemCount = len(stuff)
@@ -196,7 +206,6 @@ class Display(wx.ListCtrl):
     def refresh(self, stuff):
         if stuff is None:
             return
-
         item = -1
         for id_, st in enumerate(stuff):
 
@@ -206,15 +215,18 @@ class Display(wx.ListCtrl):
                 colItem = self.GetItem(item, i)
                 oldText = colItem.GetText()
                 oldImageId = colItem.GetImage()
+                oldColour = colItem.GetBackgroundColour()
                 newText = col.getText(st)
                 if newText is False:
                     col.delayedText(st, self, colItem)
                     newText = "\u21bb"
+                newColour = self.columnBackground(colItem, st)
 
                 newImageId = col.getImageId(st)
 
                 colItem.SetText(newText)
                 colItem.SetImage(newImageId)
+                colItem.SetBackgroundColour(newColour)
 
                 mask = 0
 
@@ -228,27 +240,23 @@ class Display(wx.ListCtrl):
                 if mask:
                     colItem.SetMask(mask)
                     self.SetItem(colItem)
+                else:
+                    if newColour != oldColour:
+                        self.SetItem(colItem)
 
                 self.SetItemData(item, id_)
 
-        # self.Freeze()
-        if 'wxMSW' in wx.PlatformInfo:
-            for i, col in enumerate(self.activeColumns):
-                if not col.resized:
+        for i, col in enumerate(self.activeColumns):
+            if not col.resized:
+                if col.size == wx.LIST_AUTOSIZE_USEHEADER:
+                    self.SetColumnWidth(i, wx.LIST_AUTOSIZE_USEHEADER)
+                    headerWidth = self.GetColumnWidth(i)
+                    self.SetColumnWidth(i, wx.LIST_AUTOSIZE)
+                    baseWidth = self.GetColumnWidth(i)
+                    if baseWidth < headerWidth:
+                        self.SetColumnWidth(i, headerWidth)
+                else:
                     self.SetColumnWidth(i, col.size)
-        else:
-            for i, col in enumerate(self.activeColumns):
-                if not col.resized:
-                    if col.size == wx.LIST_AUTOSIZE_USEHEADER:
-                        self.SetColumnWidth(i, wx.LIST_AUTOSIZE_USEHEADER)
-                        headerWidth = self.GetColumnWidth(i)
-                        self.SetColumnWidth(i, wx.LIST_AUTOSIZE)
-                        baseWidth = self.GetColumnWidth(i)
-                        if baseWidth < headerWidth:
-                            self.SetColumnWidth(i, headerWidth)
-                    else:
-                        self.SetColumnWidth(i, col.size)
-                        # self.Thaw()
 
     def update(self, stuff):
         self.populate(stuff)
@@ -257,3 +265,52 @@ class Display(wx.ListCtrl):
     def getColumn(self, point):
         row, _, col = self.HitTestSubItem(point)
         return col
+
+    def columnBackground(self, colItem, item):
+        return colItem.GetBackgroundColour()
+
+    def getRowByAbs(self, pointAbs):
+        if pointAbs == wx.Point(-1, -1):
+            return -1
+        pointRel = self.screenToClientFixed(pointAbs)
+        row, flags = self.HitTest(pointRel)
+        return row
+
+    def screenToClientFixed(self, ptScreen):
+        """
+        Wx' ScreenToClient implementation seems to not consider header row height when
+        converting to screen position: https://github.com/wxWidgets/Phoenix/issues/1213
+        Do it ourselves here.
+        """
+        if ptScreen == wx.Point(-1, -1):
+            return wx.Point(-1, -1)
+        ptClient = self.GetMainWindow().ScreenToClient(ptScreen)
+        return ptClient
+
+    def getSelectedRows(self):
+        rows = []
+        row = self.GetFirstSelected()
+        while row != -1:
+            rows.append(row)
+            row = self.GetNextSelected(row)
+        return rows
+
+    def getWidthProportion(self):
+        propWidth = sum(c.proportionWidth for c in self.activeColumns)
+        return propWidth
+
+    def ensureSelection(self, clickedPos):
+        """
+        On mac, when right-click on any item happens, it doesn't get selected.
+        This method ensures that selection actually happens.
+        """
+        if 'wxMac' in wx.PlatformInfo:
+            if clickedPos != -1:
+                selectedPoss = self.getSelectedRows()
+                if clickedPos not in selectedPoss:
+                    self.unselectAll()
+                    self.Select(clickedPos)
+                    # Change focus only when we manipulate selection
+                    focusedPos = self.GetFocusedItem()
+                    if clickedPos != focusedPos:
+                        self.Focus(clickedPos)

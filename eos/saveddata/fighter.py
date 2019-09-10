@@ -17,16 +17,19 @@
 # along with eos.  If not, see <http://www.gnu.org/licenses/>.
 # ===============================================================================
 
+import math
 from logbook import Logger
-
-from sqlalchemy.orm import validates, reconstructor
+from sqlalchemy.orm import reconstructor, validates
 
 import eos.db
-from eos.effectHandlerHelpers import HandledItem, HandledCharge
-from eos.modifiedAttributeDict import ModifiedAttributeDict, ItemAttrShortcut, ChargeAttrShortcut
+from eos.const import FittingSlot
+from eos.effectHandlerHelpers import HandledCharge, HandledItem
+from eos.modifiedAttributeDict import ChargeAttrShortcut, ItemAttrShortcut, ModifiedAttributeDict
 from eos.saveddata.fighterAbility import FighterAbility
-from eos.saveddata.module import Slot
+from eos.utils.cycles import CycleInfo, CycleSequence
 from eos.utils.stats import DmgTypes
+from eos.utils.float import floatUnerr
+
 
 pyfalog = Logger(__name__)
 
@@ -48,7 +51,7 @@ class Fighter(HandledItem, HandledCharge, ItemAttrShortcut, ChargeAttrShortcut):
 
         # -1 is a placeholder that represents max squadron size, which we may not know yet as ships may modify this with
         # their effects. If user changes this, it is then overridden with user value.
-        self.amount = -1
+        self._amount = -1
 
         self.__abilities = self.__getAbilities()
 
@@ -56,7 +59,7 @@ class Fighter(HandledItem, HandledCharge, ItemAttrShortcut, ChargeAttrShortcut):
 
         standardAttackActive = False
         for ability in self.abilities:
-            if ability.effect.isImplemented and ability.effect.handlerName == 'fighterabilityattackm':
+            if ability.effect.isImplemented and ability.effect.name == 'fighterAbilityAttackM':
                 # Activate "standard attack" if available
                 ability.active = True
                 standardAttackActive = True
@@ -64,8 +67,8 @@ class Fighter(HandledItem, HandledCharge, ItemAttrShortcut, ChargeAttrShortcut):
                 # Activate all other abilities (Neut, Web, etc) except propmods if no standard attack is active
                 if ability.effect.isImplemented and \
                                 standardAttackActive is False and \
-                                ability.effect.handlerName != 'fighterabilitymicrowarpdrive' and \
-                                ability.effect.handlerName != 'fighterabilityevasivemaneuvers':
+                                ability.effect.name != 'fighterAbilityMicroWarpDrive' and \
+                                ability.effect.name != 'fighterAbilityEvasiveManeuvers':
                     ability.active = True
 
     @reconstructor
@@ -116,12 +119,12 @@ class Fighter(HandledItem, HandledCharge, ItemAttrShortcut, ChargeAttrShortcut):
 
     def __calculateSlot(self, item):
         types = {
-            "Light"  : Slot.F_LIGHT,
-            "Support": Slot.F_SUPPORT,
-            "Heavy"  : Slot.F_HEAVY,
-            "StandupLight": Slot.FS_LIGHT,
-            "StandupSupport": Slot.FS_SUPPORT,
-            "StandupHeavy": Slot.FS_HEAVY
+            "Light"  : FittingSlot.F_LIGHT,
+            "Support": FittingSlot.F_SUPPORT,
+            "Heavy"  : FittingSlot.F_HEAVY,
+            "StandupLight": FittingSlot.FS_LIGHT,
+            "StandupSupport": FittingSlot.FS_SUPPORT,
+            "StandupHeavy": FittingSlot.FS_HEAVY
         }
 
         for t, slot in types.items():
@@ -133,12 +136,15 @@ class Fighter(HandledItem, HandledCharge, ItemAttrShortcut, ChargeAttrShortcut):
         return self.__slot
 
     @property
-    def amountActive(self):
-        return int(self.getModifiedItemAttr("fighterSquadronMaxSize")) if self.amount == -1 else self.amount
+    def amount(self):
+        return int(self.getModifiedItemAttr("fighterSquadronMaxSize")) if self._amount == -1 else self._amount
 
-    @amountActive.setter
-    def amountActive(self, i):
-        self.amount = int(max(min(i, self.getModifiedItemAttr("fighterSquadronMaxSize")), 0))
+    @amount.setter
+    def amount(self, amount):
+        amount = max(0, int(amount))
+        if amount >= self.getModifiedItemAttr("fighterSquadronMaxSize"):
+            amount = -1
+        self._amount = amount
 
     @property
     def fighterSquadronMaxSize(self):
@@ -172,88 +178,143 @@ class Fighter(HandledItem, HandledCharge, ItemAttrShortcut, ChargeAttrShortcut):
     def hasAmmo(self):
         return self.charge is not None
 
-    def getVolley(self, targetResists=None):
-        if not self.active or self.amountActive <= 0:
-            return DmgTypes(0, 0, 0, 0)
+    def isDealingDamage(self):
+        volleyParams = self.getVolleyParametersPerEffect()
+        for effectData in volleyParams.values():
+            for volley in effectData.values():
+                if volley.total > 0:
+                    return True
+        return False
+
+    def getVolleyParametersPerEffect(self, targetProfile=None):
+        if not self.active or self.amount <= 0:
+            return {}
         if self.__baseVolley is None:
-            em = 0
-            therm = 0
-            kin = 0
-            exp = 0
+            self.__baseVolley = {}
             for ability in self.abilities:
                 # Not passing resists here as we want to calculate and store base volley
-                abilityVolley = ability.getVolley()
-                em += abilityVolley.em
-                therm += abilityVolley.thermal
-                kin += abilityVolley.kinetic
-                exp += abilityVolley.explosive
-            self.__baseVolley = DmgTypes(em, therm, kin, exp)
-        volley = DmgTypes(
-            em=self.__baseVolley.em * (1 - getattr(targetResists, "emAmount", 0)),
-            thermal=self.__baseVolley.thermal * (1 - getattr(targetResists, "thermalAmount", 0)),
-            kinetic=self.__baseVolley.kinetic * (1 - getattr(targetResists, "kineticAmount", 0)),
-            explosive=self.__baseVolley.explosive * (1 - getattr(targetResists, "explosiveAmount", 0)))
-        return volley
+                self.__baseVolley[ability.effectID] = {0: ability.getVolley()}
+        adjustedVolley = {}
+        for effectID, effectData in self.__baseVolley.items():
+            adjustedVolley[effectID] = {}
+            for volleyTime, volleyValue in effectData.items():
+                adjustedVolley[effectID][volleyTime] = DmgTypes(
+                    em=volleyValue.em * (1 - getattr(targetProfile, "emAmount", 0)),
+                    thermal=volleyValue.thermal * (1 - getattr(targetProfile, "thermalAmount", 0)),
+                    kinetic=volleyValue.kinetic * (1 - getattr(targetProfile, "kineticAmount", 0)),
+                    explosive=volleyValue.explosive * (1 - getattr(targetProfile, "explosiveAmount", 0)))
+        return adjustedVolley
 
-    def getDps(self, targetResists=None):
-        if not self.active or self.amountActive <= 0:
-            return DmgTypes(0, 0, 0, 0)
-        # Analyze cooldowns when reload is factored in
-        if self.owner.factorReload:
-            activeTimes = []
-            reloadTimes = []
-            peakEm = 0
-            peakTherm = 0
-            peakKin = 0
-            peakExp = 0
-            steadyEm = 0
-            steadyTherm = 0
-            steadyKin = 0
-            steadyExp = 0
-            for ability in self.abilities:
-                abilityDps = ability.getDps(targetResists=targetResists)
-                # Peak dps
-                peakEm += abilityDps.em
-                peakTherm += abilityDps.thermal
-                peakKin += abilityDps.kinetic
-                peakExp += abilityDps.explosive
-                # Infinite use - add to steady dps
-                if ability.numShots == 0:
-                    steadyEm += abilityDps.em
-                    steadyTherm += abilityDps.thermal
-                    steadyKin += abilityDps.kinetic
-                    steadyExp += abilityDps.explosive
-                else:
-                    activeTimes.append(ability.numShots * ability.cycleTime)
-                    reloadTimes.append(ability.reloadTime)
-            steadyDps = DmgTypes(steadyEm, steadyTherm, steadyKin, steadyExp)
-            if len(activeTimes) > 0:
-                shortestActive = sorted(activeTimes)[0]
-                longestReload = sorted(reloadTimes, reverse=True)[0]
-                peakDps = DmgTypes(peakEm, peakTherm, peakKin, peakExp)
-                peakAdjustFactor = shortestActive / (shortestActive + longestReload)
-                peakDpsAdjusted = DmgTypes(
-                    em=peakDps.em * peakAdjustFactor,
-                    thermal=peakDps.thermal * peakAdjustFactor,
-                    kinetic=peakDps.kinetic * peakAdjustFactor,
-                    explosive=peakDps.explosive * peakAdjustFactor)
-                dps = max(steadyDps, peakDpsAdjusted, key=lambda d: d.total)
-                return dps
+    def getVolleyPerEffect(self, targetProfile=None):
+        volleyParams = self.getVolleyParametersPerEffect(targetProfile=targetProfile)
+        volleyMap = {}
+        for effectID, volleyData in volleyParams.items():
+            volleyMap[effectID] = volleyData[0]
+        return volleyMap
+
+    def getVolley(self, targetProfile=None):
+        volleyParams = self.getVolleyParametersPerEffect(targetProfile=targetProfile)
+        em = 0
+        therm = 0
+        kin = 0
+        exp = 0
+        for volleyData in volleyParams.values():
+            em += volleyData[0].em
+            therm += volleyData[0].thermal
+            kin += volleyData[0].kinetic
+            exp += volleyData[0].explosive
+        return DmgTypes(em, therm, kin, exp)
+
+    def getDps(self, targetProfile=None):
+        em = 0
+        thermal = 0
+        kinetic = 0
+        explosive = 0
+        for dps in self.getDpsPerEffect(targetProfile=targetProfile).values():
+            em += dps.em
+            thermal += dps.thermal
+            kinetic += dps.kinetic
+            explosive += dps.explosive
+        return DmgTypes(em=em, thermal=thermal, kinetic=kinetic, explosive=explosive)
+
+    def getDpsPerEffect(self, targetProfile=None):
+        if not self.active or self.amount <= 0:
+            return {}
+        cycleParams = self.getCycleParametersPerEffectOptimizedDps(targetProfile=targetProfile)
+        dpsMap = {}
+        for ability in self.abilities:
+            if ability.effectID in cycleParams:
+                cycleTime = cycleParams[ability.effectID].averageTime
+                dpsMap[ability.effectID] = ability.getDps(targetProfile=targetProfile, cycleTimeOverride=cycleTime)
+        return dpsMap
+
+    def getCycleParametersPerEffectOptimizedDps(self, targetProfile=None, reloadOverride=None):
+        cycleParamsInfinite = self.getCycleParametersPerEffectInfinite()
+        cycleParamsReload = self.getCycleParametersPerEffect(reloadOverride=reloadOverride)
+        dpsMapOnlyInfinite = {}
+        dpsMapAllWithReloads = {}
+        # Decide if it's better to keep steady dps up and never reload or reload from time to time
+        for ability in self.abilities:
+            if ability.effectID in cycleParamsInfinite:
+                cycleTime = cycleParamsInfinite[ability.effectID].averageTime
+                dpsMapOnlyInfinite[ability.effectID] = ability.getDps(targetProfile=targetProfile, cycleTimeOverride=cycleTime)
+            if ability.effectID in cycleParamsReload:
+                cycleTime = cycleParamsReload[ability.effectID].averageTime
+                dpsMapAllWithReloads[ability.effectID] = ability.getDps(targetProfile=targetProfile, cycleTimeOverride=cycleTime)
+        totalOnlyInfinite = sum(i.total for i in dpsMapOnlyInfinite.values())
+        totalAllWithReloads = sum(i.total for i in dpsMapAllWithReloads.values())
+        return cycleParamsInfinite if totalOnlyInfinite >= totalAllWithReloads else cycleParamsReload
+
+    def getCycleParametersPerEffectInfinite(self):
+        return {
+            a.effectID: CycleInfo(a.cycleTime, 0, math.inf, False)
+            for a in self.abilities
+            if a.numShots == 0 and a.cycleTime > 0}
+
+    def getCycleParametersPerEffect(self, reloadOverride=None):
+        factorReload = reloadOverride if reloadOverride is not None else self.owner.factorReload
+        # Assume it can cycle infinitely
+        if not factorReload:
+            return {a.effectID: CycleInfo(a.cycleTime, 0, math.inf, False) for a in self.abilities if a.cycleTime > 0}
+        limitedAbilities = [a for a in self.abilities if a.numShots > 0 and a.cycleTime > 0]
+        if len(limitedAbilities) == 0:
+            return {a.effectID: CycleInfo(a.cycleTime, 0, math.inf, False) for a in self.abilities if a.cycleTime > 0}
+        validAbilities = [a for a in self.abilities if a.cycleTime > 0]
+        if len(validAbilities) == 0:
+            return {}
+        mostLimitedAbility = min(limitedAbilities, key=lambda a: a.cycleTime * a.numShots)
+        durationToRefuel = mostLimitedAbility.cycleTime * mostLimitedAbility.numShots
+        # find out how many shots various abilities will do until reload, and how much time
+        # "extra" cycle will last (None for no extra cycle)
+        cyclesUntilRefuel = {mostLimitedAbility.effectID: (mostLimitedAbility.numShots, None)}
+        for ability in (a for a in validAbilities if a is not mostLimitedAbility):
+            fullCycles = int(floatUnerr(durationToRefuel / ability.cycleTime))
+            extraShotTime = floatUnerr(durationToRefuel - (fullCycles * ability.cycleTime))
+            if extraShotTime == 0:
+                extraShotTime = None
+            cyclesUntilRefuel[ability.effectID] = (fullCycles, extraShotTime)
+        refuelTimes = {}
+        for ability in validAbilities:
+            spentShots, extraShotTime = cyclesUntilRefuel[ability.effectID]
+            if extraShotTime is not None:
+                spentShots += 1
+            refuelTimes[ability.effectID] = ability.getReloadTime(spentShots)
+        refuelTime = max(refuelTimes.values())
+        cycleParams = {}
+        for ability in validAbilities:
+            regularShots, extraShotTime = cyclesUntilRefuel[ability.effectID]
+            sequence = []
+            if extraShotTime is not None:
+                if regularShots > 0:
+                    sequence.append(CycleInfo(ability.cycleTime, 0, regularShots, False))
+                sequence.append(CycleInfo(extraShotTime, refuelTime, 1, True))
             else:
-                return steadyDps
-        # Just sum all abilities when not taking reload into consideration
-        else:
-            em = 0
-            therm = 0
-            kin = 0
-            exp = 0
-            for ability in self.abilities:
-                abilityDps = ability.getDps(targetResists=targetResists)
-                em += abilityDps.em
-                therm += abilityDps.thermal
-                kin += abilityDps.kinetic
-                exp += abilityDps.explosive
-            return DmgTypes(em, therm, kin, exp)
+                regularShotsNonReload = regularShots - 1
+                if regularShotsNonReload > 0:
+                    sequence.append(CycleInfo(ability.cycleTime, 0, regularShotsNonReload, False))
+                sequence.append(CycleInfo(ability.cycleTime, refuelTime, 1, True))
+            cycleParams[ability.effectID] = CycleSequence(sequence, math.inf)
+        return cycleParams
 
     @property
     def maxRange(self):
@@ -281,7 +342,7 @@ class Fighter(HandledItem, HandledCharge, ItemAttrShortcut, ChargeAttrShortcut):
             if falloff is not None:
                 return falloff
 
-    @validates("ID", "itemID", "chargeID", "amount", "amountActive")
+    @validates("ID", "itemID", "chargeID", "amount")
     def validator(self, key, val):
         map = {
             "ID"      : lambda _val: isinstance(_val, int),
@@ -289,7 +350,6 @@ class Fighter(HandledItem, HandledCharge, ItemAttrShortcut, ChargeAttrShortcut):
             "chargeID": lambda _val: isinstance(_val, int),
             "amount"  : lambda _val: isinstance(_val, int) and _val >= -1,
         }
-
         if not map[key](val):
             raise ValueError(str(val) + " is not a valid value for " + key)
         else:
@@ -339,21 +399,38 @@ class Fighter(HandledItem, HandledCharge, ItemAttrShortcut, ChargeAttrShortcut):
             if effect.runTime == runTime and effect.activeByDefault and \
                     ((projected and effect.isType("projected")) or not projected):
                 if ability.grouped:
-                    effect.handler(fit, self, context)
+                    try:
+                        effect.handler(fit, self, context, effect=effect)
+                    except:
+                        effect.handler(fit, self, context)
                 else:
                     i = 0
-                    while i != self.amountActive:
-                        effect.handler(fit, self, context)
+                    while i != self.amount:
+                        try:
+                            effect.handler(fit, self, context, effect=effect)
+                        except:
+                            effect.handler(fit, self, context)
                         i += 1
 
     def __deepcopy__(self, memo):
         copy = Fighter(self.item)
-        copy.amount = self.amount
+        copy._amount = self._amount
         copy.active = self.active
         for ability in self.abilities:
             copyAbility = next(filter(lambda a: a.effectID == ability.effectID, copy.abilities))
             copyAbility.active = ability.active
         return copy
+
+    def rebase(self, item):
+        amount = self._amount
+        active = self.active
+        abilityEffectStates = {a.effectID: a.active for a in self.abilities}
+        Fighter.__init__(self, item)
+        self._amount = amount
+        self.active = active
+        for ability in self.abilities:
+            if ability.effectID in abilityEffectStates:
+                ability.active = abilityEffectStates[ability.effectID]
 
     def fits(self, fit):
         # If ships doesn't support this type of fighter, don't add it

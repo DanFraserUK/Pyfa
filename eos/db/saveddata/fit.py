@@ -31,7 +31,7 @@ from eos.db.saveddata.drone import drones_table
 from eos.db.saveddata.fighter import fighters_table
 from eos.db.saveddata.implant import fitImplants_table
 from eos.db.saveddata.module import modules_table
-from eos.effectHandlerHelpers import HandledDroneCargoList, HandledImplantBoosterList, HandledModuleList, HandledProjectedDroneList, HandledProjectedModList
+from eos.effectHandlerHelpers import HandledDroneCargoList, HandledImplantList, HandledBoosterList, HandledModuleList, HandledProjectedDroneList, HandledProjectedModList
 from eos.saveddata.booster import Booster
 from eos.saveddata.cargo import Cargo
 from eos.saveddata.character import Character
@@ -41,8 +41,9 @@ from eos.saveddata.fighter import Fighter
 from eos.saveddata.fit import Fit as es_Fit
 from eos.saveddata.implant import Implant
 from eos.saveddata.module import Module
-from eos.saveddata.targetResists import TargetResists
+from eos.saveddata.targetProfile import TargetProfile
 from eos.saveddata.user import User
+
 
 fits_table = Table("fits", saveddata_meta,
                    Column("ID", Integer, primary_key=True),
@@ -59,7 +60,8 @@ fits_table = Table("fits", saveddata_meta,
                    Column("notes", String, nullable=True),
                    Column("ignoreRestrictions", Boolean, default=0),
                    Column("created", DateTime, nullable=True, default=datetime.datetime.now),
-                   Column("modified", DateTime, nullable=True, default=datetime.datetime.now, onupdate=datetime.datetime.now)
+                   Column("modified", DateTime, nullable=True, default=datetime.datetime.now, onupdate=datetime.datetime.now),
+                   Column("systemSecurity", Integer, nullable=True)
                    )
 
 projectedFits_table = Table("projectedFits", saveddata_meta,
@@ -80,7 +82,7 @@ commandFits_table = Table("commandFits", saveddata_meta,
                           )
 
 
-class ProjectedFit(object):
+class ProjectedFit:
     def __init__(self, sourceID, source_fit, amount=1, active=True):
         self.sourceID = sourceID
         self.source_fit = source_fit
@@ -111,7 +113,7 @@ class ProjectedFit(object):
         )
 
 
-class CommandFit(object):
+class CommandFit:
     def __init__(self, boosterID, booster_fit, active=True):
         self.boosterID = boosterID
         self.booster_fit = booster_fit
@@ -183,7 +185,7 @@ mapper(es_Fit, fits_table,
            "shipID": fits_table.c.shipID,
            "_Fit__boosters": relation(
                    Booster,
-                   collection_class=HandledImplantBoosterList,
+                   collection_class=HandledBoosterList,
                    cascade='all, delete, delete-orphan',
                    backref='owner',
                    single_parent=True),
@@ -219,7 +221,7 @@ mapper(es_Fit, fits_table,
                    primaryjoin=and_(fighters_table.c.fitID == fits_table.c.ID, fighters_table.c.projected == True)),  # noqa
            "_Fit__implants": relation(
                    Implant,
-                   collection_class=HandledImplantBoosterList,
+                   collection_class=HandledImplantList,
                    cascade='all, delete, delete-orphan',
                    backref='owner',
                    single_parent=True,
@@ -230,7 +232,7 @@ mapper(es_Fit, fits_table,
                    Character,
                    backref="fits"),
            "_Fit__damagePattern": relation(DamagePattern),
-           "_Fit__targetResists": relation(TargetResists),
+           "_Fit__targetProfile": relation(TargetProfile),
            "projectedOnto": projectedFitSourceRel,
            "victimOf": relationship(
                    ProjectedFit,

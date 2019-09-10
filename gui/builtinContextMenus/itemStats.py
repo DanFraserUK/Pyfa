@@ -1,45 +1,49 @@
-from gui.contextMenu import ContextMenu
-from gui.itemStats import ItemStatsDialog
-import gui.mainFrame
 # noinspection PyPackageRequirements
 import wx
+
+import gui.mainFrame
+from gui.contextMenu import ContextMenuSingle
+from gui.itemStats import ItemStatsFrame
 from service.fit import Fit
-from service.settings import ContextMenuSettings
 
 
-class ItemStats(ContextMenu):
+class ItemStats(ContextMenuSingle):
     def __init__(self):
         self.mainFrame = gui.mainFrame.MainFrame.getInstance()
-        self.settings = ContextMenuSettings.getInstance()
 
-    def display(self, srcContext, selection):
-        if not self.settings.get('itemStats'):
+    def display(self, callingWindow, srcContext, mainItem):
+        if srcContext not in (
+            "marketItemGroup", "marketItemMisc",
+            "fittingModule", "fittingCharge",
+            "fittingShip", "baseShip",
+            "cargoItem", "droneItem",
+            "implantItem", "boosterItem",
+            "skillItem", "projectedModule",
+            "projectedDrone", "projectedCharge",
+            "itemStats", "fighterItem",
+            "implantItemChar", "projectedFighter",
+            "fittingMode"
+        ):
             return False
 
-        return srcContext in ("marketItemGroup", "marketItemMisc",
-                              "fittingModule", "fittingCharge",
-                              "fittingShip", "baseShip",
-                              "cargoItem", "droneItem",
-                              "implantItem", "boosterItem",
-                              "skillItem", "projectedModule",
-                              "projectedDrone", "projectedCharge",
-                              "itemStats", "fighterItem",
-                              "implantItemChar", "projectedFighter",
-                              "fittingMode")
+        if (mainItem is None or getattr(mainItem, "isEmpty", False)) and srcContext != "fittingShip":
+            return False
 
-    def getText(self, itmContext, selection):
-        return "{0} Stats".format(itmContext if itmContext is not None else "Item")
+        return True
 
-    def activate(self, fullContext, selection, i):
+    def getText(self, callingWindow, itmContext, mainItem):
+        return "{} Stats".format(itmContext if itmContext is not None else "Item")
+
+    def activate(self, callingWindow, fullContext, mainItem, i):
         srcContext = fullContext[0]
         if srcContext == "fittingShip":
             fitID = self.mainFrame.getActiveFit()
             sFit = Fit.getInstance()
             stuff = sFit.getFit(fitID).ship
         elif srcContext == "fittingMode":
-            stuff = selection[0].item
+            stuff = mainItem.item
         else:
-            stuff = selection[0]
+            stuff = mainItem
 
         if srcContext == "fittingModule" and stuff.isEmpty:
             return
@@ -47,12 +51,11 @@ class ItemStats(ContextMenu):
         mstate = wx.GetMouseState()
         reuse = False
 
-        if mstate.cmdDown:
+        if mstate.GetModifiers() == wx.MOD_SHIFT:
             reuse = True
 
         if self.mainFrame.GetActiveStatsWindow() is None and reuse:
-            ItemStatsDialog(stuff, fullContext)
-
+            frame = ItemStatsFrame(stuff, fullContext)
         elif reuse:
             lastWnd = self.mainFrame.GetActiveStatsWindow()
             pos = lastWnd.GetPosition()
@@ -62,11 +65,12 @@ class ItemStats(ContextMenu):
             else:
                 size = wx.DefaultSize
                 pos = wx.DefaultPosition
-            ItemStatsDialog(stuff, fullContext, pos, size, maximized)
+            frame = ItemStatsFrame(stuff, fullContext, pos, size, maximized)
             lastWnd.Close()
 
         else:
-            ItemStatsDialog(stuff, fullContext)
+            frame = ItemStatsFrame(stuff, fullContext)
+        frame.Show()
 
 
 ItemStats.register()

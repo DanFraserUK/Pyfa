@@ -1,6 +1,7 @@
 # noinspection PyPackageRequirements
 import wx
 
+from eos.const import Operator
 from eos.saveddata.mode import Mode
 from eos.saveddata.character import Skill
 from eos.saveddata.implant import Implant
@@ -15,6 +16,21 @@ from eos.saveddata.fit import Fit
 import gui.mainFrame
 from gui.contextMenu import ContextMenu
 from gui.bitmap_loader import BitmapLoader
+
+
+def formatOperator(operator, stackingGroup, preResAmount, postResAmount):
+    opMap = {
+        Operator.PREASSIGN: '=',
+        Operator.PREINCREASE: '+',
+        Operator.MULTIPLY: '*',
+        Operator.POSTINCREASE: '+',
+        Operator.FORCE: '\u2263'}
+    prefix = ''
+    if stackingGroup is not None:
+        prefix += 's'
+    if preResAmount != postResAmount:
+        prefix += 'r'
+    return '{}{}'.format(prefix, opMap[operator])
 
 
 class ItemAffectedBy(wx.Panel):
@@ -65,13 +81,10 @@ class ItemAffectedBy(wx.Panel):
         self.SetSizer(mainSizer)
         self.PopulateTree()
         self.Layout()
-        self.affectedBy.Bind(wx.EVT_TREE_ITEM_RIGHT_CLICK, self.scheduleMenu)
+        self.affectedBy.Bind(wx.EVT_CONTEXT_MENU, self.spawnMenu)
 
-    def scheduleMenu(self, event):
-        event.Skip()
-        wx.CallAfter(self.spawnMenu, event.Item)
-
-    def spawnMenu(self, item):
+    def spawnMenu(self, event):
+        item, _ = self.affectedBy.HitTest(self.ScreenToClient(event.Position))
         self.affectedBy.SelectItem(item)
 
         stuff = self.affectedBy.GetItemData(item)
@@ -85,7 +98,8 @@ class ItemAffectedBy(wx.Panel):
         # instead, we send the item.
         type_ = stuff.__class__.__name__
         contexts.append(("itemStats", type_))
-        menu = ContextMenu.getMenu(stuff if type_ != "Skill" else stuff.item, *contexts)
+        stuff = stuff if type_ != "Skill" else stuff.item
+        menu = ContextMenu.getMenu(self, stuff, (stuff,), *contexts)
         self.PopupMenu(menu)
 
     def ExpandCollapseTree(self):
@@ -177,7 +191,6 @@ class ItemAffectedBy(wx.Panel):
               ]
         }
         """
-
         attributes = self.stuff.itemModifiedAttributes if self.item == self.stuff.item else self.stuff.chargeModifiedAttributes
         container = {}
         for attrName in attributes.iterAfflictions():
@@ -186,7 +199,7 @@ class ItemAffectedBy(wx.Panel):
                 continue
 
             for fit, afflictors in attributes.getAfflictions(attrName).items():
-                for afflictor, modifier, amount, used in afflictors:
+                for afflictor, operator, stackingGroup, preResAmount, postResAmount, used in afflictors:
 
                     if not used or afflictor.item is None:
                         continue
@@ -212,8 +225,10 @@ class ItemAffectedBy(wx.Panel):
                     else:
                         item = afflictor.item
 
-                    items[attrName].append(
-                            (type(afflictor), afflictor, item, modifier, amount, getattr(afflictor, "projected", False)))
+                    items[attrName].append((
+                        type(afflictor), afflictor, item,
+                        formatOperator(operator, stackingGroup, preResAmount, postResAmount),
+                        postResAmount, getattr(afflictor, "projected", False)))
 
         # Make sure projected fits are on top
         rootOrder = list(container.keys())
@@ -284,7 +299,11 @@ class ItemAffectedBy(wx.Panel):
                             penalized += "(penalized)"
                         if 'r' in attrModifier:
                             penalized += "(resisted)"
-                    attrModifier = "*"
+                        attrModifier = "*"
+
+                    if attrModifier == "+" and attrAmount < 0:
+                        attrModifier = "-"
+                        attrAmount = -attrAmount
 
                     # this is the Module node, the attribute will be attached to this
                     display = "%s %s %.2f %s" % (displayStr, attrModifier, attrAmount, penalized)
@@ -315,7 +334,7 @@ class ItemAffectedBy(wx.Panel):
                 continue
 
             for fit, afflictors in attributes.getAfflictions(attrName).items():
-                for afflictor, modifier, amount, used in afflictors:
+                for afflictor, operator, stackingGroup, preResAmount, postResAmount, used in afflictors:
                     if not used or getattr(afflictor, 'item', None) is None:
                         continue
 
@@ -342,12 +361,13 @@ class ItemAffectedBy(wx.Panel):
 
                     info = items[item.name]
                     info[1].add(afflictor)
+                    operatorStr = formatOperator(operator, stackingGroup, preResAmount, postResAmount)
                     # If info[1] > 1, there are two separate modules working.
                     # Check to make sure we only include the modifier once
                     # See GH issue 154
-                    if len(info[1]) > 1 and (attrName, modifier, amount) in info[2]:
+                    if len(info[1]) > 1 and (attrName, operatorStr, postResAmount) in info[2]:
                         continue
-                    info[2].append((attrName, modifier, amount))
+                    info[2].append((attrName, operatorStr, postResAmount))
 
         # Make sure projected fits are on top
         rootOrder = list(container.keys())
@@ -416,7 +436,11 @@ class ItemAffectedBy(wx.Panel):
                                 penalized += "(penalized)"
                             if 'r' in attrModifier:
                                 penalized += "(resisted)"
-                        attrModifier = "*"
+                            attrModifier = "*"
+
+                        if attrModifier == "+" and attrAmount < 0:
+                            attrModifier = "-"
+                            attrAmount = -attrAmount
 
                         attributes.append((attrName, (displayName if displayName != "" else attrName), attrModifier,
                                            attrAmount, penalized, attrIcon))

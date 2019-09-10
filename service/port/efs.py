@@ -1,35 +1,33 @@
 import json
-import eos.db
-
 from math import log
 from numbers import Number
+
+from logbook import Logger
+
+import eos.db
 from config import version as pyfaVersion
 from service.fit import Fit
 from service.market import Market
-from eos.enum import Enum
-from eos.saveddata.module import Hardpoint, Slot, Module, State
+from eos.const import FittingModuleState, FittingHardpoint, FittingSlot
+from service.const import PortEftRigSize
+from eos.saveddata.module import Module
 from eos.saveddata.drone import Drone
 from eos.effectHandlerHelpers import HandledList
 from eos.db import gamedata_session, getCategory, getAttributeInfo, getGroup
 from eos.gamedata import Attribute, Effect, Group, Item, ItemEffect
 from eos.utils.spoolSupport import SpoolType, SpoolOptions
-from gui.fitCommands.calc.fitAddModule import FitAddModuleCommand
-from gui.fitCommands.calc.fitRemoveModule import FitRemoveModuleCommand
-from logbook import Logger
+from gui.fitCommands.calc.module.localAdd import CalcAddLocalModuleCommand
+from gui.fitCommands.calc.module.localRemove import CalcRemoveLocalModulesCommand
+from gui.fitCommands.calc.module.changeCharges import CalcChangeModuleChargesCommand
+from gui.fitCommands.helpers import ModuleInfo
+
+
 pyfalog = Logger(__name__)
-
-
-class RigSize(Enum):
-    # Matches to item attribute "rigSize" on ship and rig items
-    SMALL = 1
-    MEDIUM = 2
-    LARGE = 3
-    CAPITAL = 4
 
 
 class EfsPort:
     wepTestSet = {}
-    version = 0.03
+    version = 0.04
 
     @staticmethod
     def attrDirectMap(values, target, source):
@@ -58,24 +56,28 @@ class EfsPort:
         mwd50mn = mapPropData("50MN Microwarpdrive II")
         mwd500mn = mapPropData("500MN Microwarpdrive II")
         mwd50000mn = mapPropData("50000MN Microwarpdrive II")
-        if rigSize == RigSize.SMALL or rigSize is None:
+        if rigSize == PortEftRigSize.SMALL or rigSize is None:
             propID = mwd5mn["id"] if shipPower > mwd5mn["powerReq"] else None
-        elif rigSize == RigSize.MEDIUM:
+        elif rigSize == PortEftRigSize.MEDIUM:
             propID = mwd50mn["id"] if shipPower > mwd50mn["powerReq"] else mwd5mn["id"]
-        elif rigSize == RigSize.LARGE:
+        elif rigSize == PortEftRigSize.LARGE:
             propID = mwd500mn["id"] if shipPower > mwd500mn["powerReq"] else mwd50mn["id"]
-        elif rigSize == RigSize.CAPITAL:
+        elif rigSize == PortEftRigSize.CAPITAL:
             propID = mwd50000mn["id"] if shipPower > mwd50000mn["powerReq"] else mwd500mn["id"]
 
         if propID is None:
             return None
-        FitAddModuleCommand(fitID, propID).Do()
-        sFit.recalc(fit)
+        cmd = CalcAddLocalModuleCommand(fitID, ModuleInfo(itemID=propID))
+        cmd.Do()
+        if cmd.needsGuiRecalc:
+            sFit.recalc(fit)
         fit = eos.db.getFit(fitID)
         mwdPropSpeed = fit.maxSpeed
         mwdPosition = list(filter(lambda mod: mod.item and mod.item.ID == propID, fit.modules))[0].position
-        FitRemoveModuleCommand(fitID, [mwdPosition]).Do()
-        sFit.recalc(fit)
+        cmd = CalcRemoveLocalModulesCommand(fitID, [mwdPosition])
+        cmd.Do()
+        if cmd.needsGuiRecalc:
+            sFit.recalc(fit)
         fit = eos.db.getFit(fitID)
         return mwdPropSpeed
 
@@ -86,7 +88,7 @@ class EfsPort:
         propWithBloom = next(filter(activePropWBloomFilter, propMods), None)
         if propWithBloom is not None:
             oldPropState = propWithBloom.state
-            propWithBloom.state = State.ONLINE
+            propWithBloom.state = FittingModuleState.ONLINE
             sFit.recalc(fit)
             sp = fit.maxSpeed
             sig = fit.ship.getModifiedItemAttr("signatureRadius")
@@ -100,6 +102,63 @@ class EfsPort:
         }
 
     @staticmethod
+    def getModsInGroups(fit, modGroupNames):
+        matchingMods = list(filter(lambda mod: mod.item and mod.item.group.name in modGroupNames, fit.modules))
+        # Sort mods to prevent the order needlessly changing as pyfa updates.
+        matchingMods.sort(key=lambda mod: mod.item.ID)
+        matchingMods.sort(key=lambda mod: mod.item.group.ID)
+        return matchingMods
+
+    # Note this also includes data for any cap boosters as they "repair" cap.
+    @staticmethod
+    def getRepairData(fit, sFit):
+        modGroupNames = [
+            "Shield Booster", "Armor Repair Unit",
+            "Ancillary Shield Booster", "Ancillary Armor Repairer",
+            "Hull Repair Unit", "Capacitor Booster",
+        ]
+        repairMods = EfsPort.getModsInGroups(fit, modGroupNames)
+        repairs = [];
+        for mod in repairMods:
+            stats = {}
+            EfsPort.attrDirectMap(["duration", "capacitorNeed"], stats, mod)
+            if mod.item.group.name in ["Armor Repair Unit", "Ancillary Armor Repairer"]:
+                stats["type"] = "Armor Repairer"
+                EfsPort.attrDirectMap(["armorDamageAmount"], stats, mod)
+                if mod.item.group.name == "Ancillary Armor Repairer":
+                    stats["numShots"] = mod.numShots
+                    EfsPort.attrDirectMap(["reloadTime", "chargedArmorDamageMultiplier"], stats, mod)
+            elif mod.item.group.name in ["Shield Booster", "Ancillary Shield Booster"]:
+                stats["type"] = "Shield Booster"
+                EfsPort.attrDirectMap(["shieldBonus"], stats, mod)
+                if mod.item.group.name == "Ancillary Shield Booster":
+                    stats["numShots"] = mod.numShots
+                    EfsPort.attrDirectMap(["reloadTime"], stats, mod)
+                    c = mod.charge
+                    if c:
+                        sFit.recalc(fit)
+                        CalcChangeModuleChargesCommand(
+                            fit.ID,
+                            projected=False,
+                            chargeMap={mod.position: None},
+                            recalc=False).Do()
+                        sFit.recalc(fit)
+                        stats["unloadedCapacitorNeed"] = mod.getModifiedItemAttr("capacitorNeed")
+                        CalcChangeModuleChargesCommand(
+                            fit.ID,
+                            projected=False,
+                            chargeMap={mod.position: c.typeID},
+                            recalc=False).Do()
+                        sFit.recalc(fit)
+            elif mod.item.group.name == "Capacitor Booster":
+                # The capacitorNeed is negative, which provides the boost.
+                stats["type"] = "Capacitor Booster"
+                stats["numShots"] = mod.numShots
+                EfsPort.attrDirectMap(["reloadTime"], stats, mod)
+            repairs.append(stats)
+        return repairs
+
+    @staticmethod
     def getOutgoingProjectionData(fit):
         # This is a subset of module groups capable of projection and a superset of those currently used by efs
         modGroupNames = [
@@ -111,10 +170,7 @@ class EfsPort:
             "Ancillary Remote Shield Booster", "Ancillary Remote Armor Repairer",
             "Titan Phenomena Generator", "Non-Repeating Hardeners", "Mutadaptive Remote Armor Repairer"
         ]
-        projectedMods = list(filter(lambda mod: mod.item and mod.item.group.name in modGroupNames, fit.modules))
-        # Sort projections to prevent the order needlessly changing as pyfa updates.
-        projectedMods.sort(key=lambda mod: mod.item.ID)
-        projectedMods.sort(key=lambda mod: mod.item.group.ID)
+        projectedMods = EfsPort.getModsInGroups(fit, modGroupNames)
         projections = []
         for mod in projectedMods:
             maxRangeDefault = 0
@@ -198,8 +254,8 @@ class EfsPort:
     def getModuleInfo(fit, padTypeIDs=False):
         moduleNames = []
         modTypeIDs = []
-        moduleNameSets = {Slot.LOW: [], Slot.MED: [], Slot.HIGH: [], Slot.RIG: [], Slot.SUBSYSTEM: []}
-        modTypeIDSets = {Slot.LOW: [], Slot.MED: [], Slot.HIGH: [], Slot.RIG: [], Slot.SUBSYSTEM: []}
+        moduleNameSets = {FittingSlot.LOW: [], FittingSlot.MED: [], FittingSlot.HIGH: [], FittingSlot.RIG: [], FittingSlot.SUBSYSTEM: []}
+        modTypeIDSets = {FittingSlot.LOW: [], FittingSlot.MED: [], FittingSlot.HIGH: [], FittingSlot.RIG: [], FittingSlot.SUBSYSTEM: []}
         for mod in fit.modules:
             try:
                 if mod.item is not None:
@@ -216,17 +272,17 @@ class EfsPort:
                 pyfalog.error("Could not find name for module {0}".format(vars(mod)))
 
         for modInfo in [
-            ["High Slots:"], moduleNameSets[Slot.HIGH], ["", "Med Slots:"], moduleNameSets[Slot.MED],
-            ["", "Low Slots:"], moduleNameSets[Slot.LOW], ["", "Rig Slots:"], moduleNameSets[Slot.RIG]
+            ["High Slots:"], moduleNameSets[FittingSlot.HIGH], ["", "Med Slots:"], moduleNameSets[FittingSlot.MED],
+            ["", "Low Slots:"], moduleNameSets[FittingSlot.LOW], ["", "Rig Slots:"], moduleNameSets[FittingSlot.RIG]
         ]:
             moduleNames.extend(modInfo)
-        if len(moduleNameSets[Slot.SUBSYSTEM]) > 0:
+        if len(moduleNameSets[FittingSlot.SUBSYSTEM]) > 0:
             moduleNames.extend(["", "Subsystems:"])
-            moduleNames.extend(moduleNameSets[Slot.SUBSYSTEM])
+            moduleNames.extend(moduleNameSets[FittingSlot.SUBSYSTEM])
 
-        for slotType in [Slot.HIGH, Slot.MED, Slot.LOW, Slot.RIG, Slot.SUBSYSTEM]:
-            if slotType is not Slot.SUBSYSTEM or len(modTypeIDSets[slotType]) > 0:
-                modTypeIDs.extend([0, 0] if slotType is not Slot.HIGH else [0])
+        for slotType in [FittingSlot.HIGH, FittingSlot.MED, FittingSlot.LOW, FittingSlot.RIG, FittingSlot.SUBSYSTEM]:
+            if slotType is not FittingSlot.SUBSYSTEM or len(modTypeIDSets[slotType]) > 0:
+                modTypeIDs.extend([0, 0] if slotType is not FittingSlot.HIGH else [0])
                 modTypeIDs.extend(modTypeIDSets[slotType])
 
         droneNames = []
@@ -238,9 +294,9 @@ class EfsPort:
                 droneIDs.append(drone.item.typeID)
                 droneNames.append("%s x%s" % (drone.item.name, drone.amount))
         for fighter in fit.fighters:
-            if fighter.amountActive > 0:
+            if fighter.amount > 0:
                 fighterIDs.append(fighter.item.typeID)
-                fighterNames.append("%s x%s" % (fighter.item.name, fighter.amountActive))
+                fighterNames.append("%s x%s" % (fighter.item.name, fighter.amount))
         if len(droneNames) > 0:
             modTypeIDs.extend([0, 0])
             modTypeIDs.extend(droneIDs)
@@ -296,7 +352,7 @@ class EfsPort:
         abBaseDamage = sum(map(lambda damType: fighterAttr(baseRefDam + damType), damTypes))
         abDamage = abBaseDamage * fighterAttr(baseRefDam + "Multiplier")
         return {
-            "name": abilityName, "volley": abDamage * fighter.amountActive, "explosionRadius": fighterAttr(baseRef + "ExplosionRadius"),
+            "name": abilityName, "volley": abDamage * fighter.amount, "explosionRadius": fighterAttr(baseRef + "ExplosionRadius"),
             "explosionVelocity": fighterAttr(baseRef + "ExplosionVelocity"), "optimal": fighterAttr(baseRef + rangeSuffix),
             "damageReductionFactor": damageReductionFactor, "rof": fighterAttr(baseRef + "Duration"),
         }
@@ -331,18 +387,22 @@ class EfsPort:
                 name = stats.item.name + ", " + stats.charge.name
             else:
                 name = stats.item.name
-            if stats.hardpoint == Hardpoint.TURRET:
+            if stats.hardpoint == FittingHardpoint.TURRET:
                 tracking = stats.getModifiedItemAttr("trackingSpeed")
                 typeing = "Turret"
             # Bombs share most attributes with missiles despite not needing the hardpoint
-            elif stats.hardpoint == Hardpoint.MISSILE or "Bomb Launcher" in stats.item.name:
+            elif stats.hardpoint == FittingHardpoint.MISSILE or "Bomb Launcher" in stats.item.name:
                 maxVelocity = stats.getModifiedChargeAttr("maxVelocity")
                 explosionDelay = stats.getModifiedChargeAttr("explosionDelay")
                 damageReductionFactor = stats.getModifiedChargeAttr("aoeDamageReductionFactor")
                 explosionRadius = stats.getModifiedChargeAttr("aoeCloudSize")
                 explosionVelocity = stats.getModifiedChargeAttr("aoeVelocity")
                 typeing = "Missile"
-            elif stats.hardpoint == Hardpoint.NONE:
+            # AoE DDs can be treated like missiles with a damageReductionFactor of 0
+            elif stats.item.group.name == 'Super Weapon' and stats.maxRange:
+                explosionRadius = stats.getModifiedItemAttr("signatureRadius")
+                typeing = "Missile"
+            elif stats.hardpoint == FittingHardpoint.NONE:
                 aoeFieldRange = stats.getModifiedItemAttr("empFieldRange")
                 # This also covers non-bomb weapons with dps values and no hardpoints, most notably targeted doomsdays.
                 typeing = "SmartBomb"
@@ -355,7 +415,7 @@ class EfsPort:
                 "dps": stats.getDps(spoolOptions=spoolOptions).total * n, "capUse": stats.capUse * n, "falloff": stats.falloff,
                 "type": typeing, "name": name, "optimal": maxRange,
                 "numCharges": stats.numCharges, "numShots": stats.numShots, "reloadTime": stats.reloadTime,
-                "cycleTime": stats.cycleTime, "volley": stats.getVolley(spoolOptions=spoolOptions).total * n, "tracking": tracking,
+                "cycleTime": stats.getCycleParameters().averageTime, "volley": stats.getVolley(spoolOptions=spoolOptions).total * n, "tracking": tracking,
                 "maxVelocity": maxVelocity, "explosionDelay": explosionDelay, "damageReductionFactor": damageReductionFactor,
                 "explosionRadius": explosionRadius, "explosionVelocity": explosionVelocity, "aoeFieldRange": aoeFieldRange,
                 "damageMultiplierBonusMax": stats.getModifiedItemAttr("damageMultiplierBonusMax"),
@@ -368,14 +428,14 @@ class EfsPort:
                 # Drones are using the old tracking formula for trackingSpeed. This updates it to match turrets.
                 newTracking = droneAttr("trackingSpeed") / (droneAttr("optimalSigRadius") / 40000)
                 statDict = {
-                    "dps": drone.getDps().total, "cycleTime": drone.cycleTime, "type": "Drone",
+                    "dps": drone.getDps().total, "cycleTime": drone.getCycleParameters().averageTime, "type": "Drone",
                     "optimal": drone.maxRange, "name": drone.item.name, "falloff": drone.falloff,
                     "maxSpeed": droneAttr("maxVelocity"), "tracking": newTracking,
                     "volley": drone.getVolley().total
                 }
                 weaponSystems.append(statDict)
         for fighter in fit.fighters:
-            if fighter.getDps().total > 0 and fighter.amountActive > 0:
+            if fighter.getDps().total > 0 and fighter.amount > 0:
                 fighterAttr = fighter.getModifiedItemAttr
                 abilities = []
                 if "fighterAbilityAttackMissileDamageEM" in fighter.item.attributes.keys():
@@ -389,7 +449,7 @@ class EfsPort:
                 statDict = {
                     "dps": fighter.getDps().total, "type": "Fighter", "name": fighter.item.name,
                     "maxSpeed": fighterAttr("maxVelocity"), "abilities": abilities,
-                    "ehp": fighterAttr("shieldCapacity") / 0.8875 * fighter.amountActive,
+                    "ehp": fighterAttr("shieldCapacity") / 0.8875 * fighter.amount,
                     "volley": fighter.getVolley().total, "signatureRadius": fighterAttr("signatureRadius")
                 }
                 weaponSystems.append(statDict)
@@ -496,12 +556,12 @@ class EfsPort:
             getDroneMulti = lambda d: sumDamage(d.getModifiedItemAttr) * d.getModifiedItemAttr("damageMultiplier")
             fitMultipliers["drones"] = list(map(getDroneMulti, tf.drones))
 
-            getFitTurrets = lambda f: filter(lambda mod: mod.hardpoint == Hardpoint.TURRET, f.modules)
-            getTurretMulti = lambda mod: mod.getModifiedItemAttr("damageMultiplier") / mod.cycleTime
+            getFitTurrets = lambda f: filter(lambda mod: mod.hardpoint == FittingHardpoint.TURRET, f.modules)
+            getTurretMulti = lambda mod: mod.getModifiedItemAttr("damageMultiplier") / mod.getCycleParameters().averageTime
             fitMultipliers["turrets"] = list(map(getTurretMulti, getFitTurrets(tf)))
 
-            getFitLaunchers = lambda f: filter(lambda mod: mod.hardpoint == Hardpoint.MISSILE, f.modules)
-            getLauncherMulti = lambda mod: sumDamage(mod.getModifiedChargeAttr) / mod.cycleTime
+            getFitLaunchers = lambda f: filter(lambda mod: mod.hardpoint == FittingHardpoint.MISSILE, f.modules)
+            getLauncherMulti = lambda mod: sumDamage(mod.getModifiedChargeAttr) / mod.getCycleParameters().averageTime
             fitMultipliers["launchers"] = list(map(getLauncherMulti, getFitLaunchers(tf)))
             return fitMultipliers
 
@@ -530,18 +590,18 @@ class EfsPort:
         tf.mode = fit.mode
         preTraitMultipliers = getCurrentMultipliers(tf)
         for effect in fit.ship.item.effects.values():
-            if effect._Effect__effectModule is not None:
+            if effect.isImplemented:
                 effect.handler(tf, tf.ship, [])
         # Factor in mode effects for T3 Destroyers
         if fit.mode is not None:
             for effect in fit.mode.item.effects.values():
-                if effect._Effect__effectModule is not None:
+                if effect.isImplemented:
                     effect.handler(tf, fit.mode, [])
         if fit.ship.item.groupID == getGroup("Strategic Cruiser").ID:
-            subSystems = list(filter(lambda mod: mod.slot == Slot.SUBSYSTEM and mod.item, fit.modules))
+            subSystems = list(filter(lambda mod: mod.slot == FittingSlot.SUBSYSTEM and mod.item, fit.modules))
             for sub in subSystems:
                 for effect in sub.item.effects.values():
-                    if effect._Effect__effectModule is not None:
+                    if effect.isImplemented:
                         effect.handler(tf, sub, [])
         postTraitMultipliers = getCurrentMultipliers(tf)
         getMaxRatio = lambda dictA, dictB, key: max(map(lambda a, b: b / a, dictA[key], dictB[key]))
@@ -583,7 +643,7 @@ class EfsPort:
         return sizeNotFoundMsg
 
     @staticmethod
-    def exportEfs(fit, typeNotFitFlag):
+    def exportEfs(fit, typeNotFitFlag, callback):
         sFit = Fit.getInstance()
         includeShipTypeData = typeNotFitFlag > 0
         if includeShipTypeData:
@@ -631,6 +691,12 @@ class EfsPort:
         defaultSpoolValue = 1
         spoolOptions = SpoolOptions(SpoolType.SCALE, defaultSpoolValue, True)
 
+        cargoIDs = []
+        for cargo in fit.cargo:
+            cargoIDs.append(cargo.itemID)
+
+        repairs = EfsPort.getRepairData(fit, sFit)
+
         def roundNumbers(data, digits):
             if isinstance(data, str):
                 return
@@ -659,6 +725,7 @@ class EfsPort:
                 "scanStrength": fit.scanStrength, "weaponDPS": fit.getWeaponDps(spoolOptions=spoolOptions).total,
                 "alignTime": fit.alignTime, "signatureRadius": fitModAttr("signatureRadius"), "weapons": weaponSystems,
                 "scanRes": fitModAttr("scanResolution"), "capUsed": fit.capUsed, "capRecharge": fit.capRecharge,
+                "capacitorCapacity": fitModAttr("capacitorCapacity"), "rechargeRate": fitModAttr("rechargeRate"),
                 "rigSlots": fitModAttr("rigSlots"), "lowSlots": fitModAttr("lowSlots"),
                 "midSlots": fitModAttr("medSlots"), "highSlots": fitModAttr("hiSlots"),
                 "turretSlots": fitModAttr("turretSlotsLeft"), "launcherSlots": fitModAttr("launcherSlotsLeft"),
@@ -669,7 +736,7 @@ class EfsPort:
                 "droneControlRange": fitModAttr("droneControlRange"), "mass": fitModAttr("mass"),
                 "unpropedSpeed": propData["unpropedSpeed"], "unpropedSig": propData["unpropedSig"],
                 "usingMWD": propData["usingMWD"], "mwdPropSpeed": mwdPropSpeed, "projections": projections,
-                "modTypeIDs": modTypeIDs, "moduleNames": moduleNames,
+                "repairs": repairs, "modTypeIDs": modTypeIDs, "moduleNames": moduleNames, "cargoItemIDs": cargoIDs,
                 "pyfaVersion": pyfaVersion, "efsExportVersion": EfsPort.version
             }
             # Recursively round any numbers in dicts to 6 decimal places.
@@ -680,4 +747,8 @@ class EfsPort:
             pyfalog.error(e)
             dataDict = {"name": fitName + "Fit could not be correctly parsed"}
         export = json.dumps(dataDict, skipkeys=True)
-        return export
+
+        if callback:
+            callback(export)
+        else:
+            return export

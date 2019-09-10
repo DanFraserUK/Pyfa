@@ -27,12 +27,12 @@ from sqlalchemy.orm import validates, reconstructor
 import eos
 import eos.db
 import eos.config
-from eos.effectHandlerHelpers import HandledItem, HandledImplantBoosterList
+from eos.effectHandlerHelpers import HandledItem, HandledImplantList
 
 pyfalog = Logger(__name__)
 
 
-class Character(object):
+class Character:
     __itemList = None
     __itemIDMap = None
     __itemNameMap = None
@@ -51,7 +51,7 @@ class Character(object):
             for item in self.getSkillList():
                 self.addSkill(Skill(self, item.ID, self.defaultLevel))
 
-        self.__implants = HandledImplantBoosterList()
+        self.__implants = HandledImplantList()
 
     @reconstructor
     def init(self):

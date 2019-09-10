@@ -10,13 +10,14 @@ import config
 import gui.builtinShipBrowser.sfBrowserItem as SFItem
 import gui.fitCommands as cmd
 import gui.mainFrame
+import gui.globalEvents as GE
 import gui.utils.color as colorUtils
 import gui.utils.draw as drawUtils
 import gui.utils.fonts as fonts
 from gui.bitmap_loader import BitmapLoader
 from gui.builtinShipBrowser.pfBitmapFrame import PFBitmapFrame
 from service.fit import Fit
-from .events import BoosterListUpdated, FitRemoved, FitSelected, ImportSelected, SearchSelected, Stage3Selected
+from .events import BoosterListUpdated, FitSelected, ImportSelected, SearchSelected, Stage3Selected
 
 pyfalog = Logger(__name__)
 
@@ -121,6 +122,7 @@ class FitItem(SFItem.SFBrowserItem):
         self.tcFitName.Bind(wx.EVT_KILL_FOCUS, self.editLostFocus)
         self.tcFitName.Bind(wx.EVT_KEY_DOWN, self.editCheckEsc)
         self.Bind(wx.EVT_MOUSE_CAPTURE_LOST, self.OnMouseCaptureLost)
+        self.mainFrame.Bind(GE.FIT_RENAMED, self.OnFitRename)
 
         self.animTimerId = wx.NewId()
         self.animTimer = wx.Timer(self, self.animTimerId)
@@ -169,27 +171,20 @@ class FitItem(SFItem.SFBrowserItem):
     def OpenNewTab(self, evt):
         self.selectFit(newTab=True)
 
-    def OnToggleBooster(self, event):
-        sFit = Fit.getInstance()
-        sFit.toggleBoostFit(self.fitID)
-        self.fitBooster = not self.fitBooster
-        self.boosterBtn.Show(self.fitBooster)
-        self.Refresh()
-        wx.PostEvent(self.mainFrame, BoosterListUpdated())
-        event.Skip()
 
     def OnProjectToFit(self, event):
         activeFit = self.mainFrame.getActiveFit()
         if activeFit:
             sFit = Fit.getInstance()
             projectedFit = sFit.getFit(self.fitID)
-            if self.mainFrame.command.Submit(cmd.GuiAddProjectedCommand(activeFit, projectedFit.ID, 'fit')):
+            command = cmd.GuiAddProjectedFitsCommand(fitID=activeFit, projectedFitIDs=[projectedFit.ID], amount=1)
+            if self.mainFrame.command.Submit(command):
                 self.mainFrame.additionsPane.select("Projected")
 
     def OnAddCommandFit(self, event):
         activeFit = self.mainFrame.getActiveFit()
         if activeFit:
-            if self.mainFrame.command.Submit(cmd.GuiAddCommandCommand(activeFit, self.fitID)):
+            if self.mainFrame.command.Submit(cmd.GuiAddCommandFitsCommand(fitID=activeFit, commandFitIDs=[self.fitID])):
                 self.mainFrame.additionsPane.select("Command")
 
     def OnMouseCaptureLost(self, event):
@@ -288,7 +283,9 @@ class FitItem(SFItem.SFBrowserItem):
         event.Skip()
 
     def editCheckEsc(self, event):
-        if event.GetKeyCode() == wx.WXK_ESCAPE:
+        keycode = event.GetKeyCode()
+        mstate = wx.GetMouseState()
+        if keycode == wx.WXK_ESCAPE and mstate.GetModifiers() == wx.MOD_NONE:
             self.RestoreEditButton()
         else:
             event.Skip()
@@ -325,10 +322,17 @@ class FitItem(SFItem.SFBrowserItem):
         self.editWasShown = 0
         fitName = self.tcFitName.GetValue()
         if fitName:
-            self.fitName = fitName
-            self.mainFrame.command.Submit(cmd.GuiFitRenameCommand(self.fitID, self.fitName))
+            self.mainFrame.command.Submit(cmd.GuiRenameFitCommand(self.fitID, fitName))
         else:
             self.tcFitName.SetValue(self.fitName)
+
+    def OnFitRename(self, event):
+        if event.fitID == self.fitID:
+            fit = Fit.getInstance().getFit(self.fitID)
+            self.fitName = fit.name
+            if self:
+                self.Refresh()
+        event.Skip()
 
     def deleteBtnCB(self):
         if self.tcFitName.IsShown():
@@ -336,18 +340,17 @@ class FitItem(SFItem.SFBrowserItem):
             return
 
         # to prevent accidental deletion, give dialog confirmation unless shift is depressed
-        if wx.GetMouseState().ShiftDown() or wx.GetMouseState().MiddleIsDown():
+        mstate = wx.GetMouseState()
+        if mstate.GetModifiers() == wx.MOD_SHIFT or mstate.MiddleIsDown():
             self.deleteFit()
         else:
             dlg = wx.MessageDialog(
-                self,
-                "Do you really want to delete this fit?",
-                "Confirm Delete",
-                wx.YES | wx.NO | wx.ICON_QUESTION
-            )
-
+                self, "Do you really want to delete this fit?", "Confirm Delete",
+                wx.YES | wx.NO | wx.ICON_QUESTION)
             if dlg.ShowModal() == wx.ID_YES:
                 self.deleteFit()
+            else:
+                dlg.Destroy()
 
     def deleteFit(self, event=None):
         pyfalog.debug("Deleting ship fit.")
@@ -366,9 +369,8 @@ class FitItem(SFItem.SFBrowserItem):
                     break
 
         sFit.deleteFit(self.fitID)
-
         # Notify other areas that a fit has been deleted
-        wx.PostEvent(self.mainFrame, FitRemoved(fitID=self.fitID))
+        wx.PostEvent(self.mainFrame, GE.FitRemoved(fitID=self.fitID))
 
         # todo: would a simple RefreshList() work here instead of posting that a stage has been selected?
         if self.shipBrowser.GetActiveStage() == 5:

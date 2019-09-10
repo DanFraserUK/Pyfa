@@ -28,6 +28,7 @@ from gui.bitmap_loader import BitmapLoader
 from gui.utils.numberFormatter import formatAmount
 from gui.utils.listFormatter import formatList
 from eos.utils.spoolSupport import SpoolType, SpoolOptions
+import eos.config
 
 
 class Miscellanea(ViewColumn):
@@ -77,37 +78,30 @@ class Miscellanea(ViewColumn):
             text = "{0} min".format(formatAmount(stuff.getModifiedItemAttr("boosterDuration") / 1000 / 60, 3, 0, 3))
             return text, "Booster Duration"
         elif itemGroup in ("Super Weapon", "Structure Doomsday Weapon"):
-            doomsday_duration = stuff.getModifiedItemAttr("doomsdayDamageDuration", 1)
-            doomsday_dottime = stuff.getModifiedItemAttr("doomsdayDamageCycleTime", 1)
-            func = stuff.getModifiedItemAttr
-
-            volley = sum(
-                map(
-                    lambda attr: (func("%sDamage" % attr) or 0),
-                    ("em", "thermal", "kinetic", "explosive")
-                )
-            )
-            volley *= stuff.getModifiedItemAttr("damageMultiplier") or 1
-
-            if volley <= 0:
+            volleyParams = stuff.getVolleyParameters(ignoreState=True)
+            dmg = sum(dt.total for dt in volleyParams.values())
+            duration = (max(volleyParams) - min(volleyParams)) / 1000
+            if dmg <= 0:
                 text = ""
                 tooltip = ""
-            elif max(doomsday_duration / doomsday_dottime, 1) > 1:
+            elif duration > 0:
                 text = "{} over {}s".format(
-                    formatAmount(volley * (doomsday_duration / doomsday_dottime), 3, 0, 6),
-                    formatAmount((doomsday_duration / 1000), 0, 0, 0))
+                    formatAmount(dmg, 3, 0, 6),
+                    formatAmount((duration), 0, 0, 0))
                 tooltip = "Raw damage done over time"
             else:
-                text = "{0} dmg".format(formatAmount(volley * (doomsday_duration / doomsday_dottime), 3, 0, 3))
+                text = "{} dmg".format(formatAmount(dmg, 3, 0, 6))
                 tooltip = "Raw damage done"
             return text, tooltip
 
             pass
         elif itemGroup in ("Energy Weapon", "Hybrid Weapon", "Projectile Weapon", "Combat Drone", "Fighter Drone"):
             trackingSpeed = stuff.getModifiedItemAttr("trackingSpeed")
-            if not trackingSpeed:
+            optimalSig = stuff.getModifiedItemAttr("optimalSigRadius")
+            if not trackingSpeed or not optimalSig:
                 return "", None
-            text = "{0}".format(formatAmount(trackingSpeed, 3, 0, 3))
+            normalizedTracking = trackingSpeed * 40000 / optimalSig
+            text = "{0}".format(formatAmount(normalizedTracking, 3, 0, 3))
             tooltip = "Tracking speed"
             return text, tooltip
         elif itemGroup == "Precursor Weapon":
@@ -117,8 +111,8 @@ class Miscellanea(ViewColumn):
                 text = "{0}".format(formatAmount(trackingSpeed, 3, 0, 3))
                 tooltip = "tracking speed"
                 info.append((text, tooltip))
-            # TODO: fetch spoolup option
-            defaultSpoolValue = 1
+
+            defaultSpoolValue = eos.config.settings['globalDefaultSpoolupPercentage']
             spoolTime = stuff.getSpoolData(spoolOptions=SpoolOptions(SpoolType.SCALE, defaultSpoolValue, False))[1]
             if spoolTime:
                 text = "{0}s".format(formatAmount(spoolTime, 3, 0, 3))
@@ -137,9 +131,15 @@ class Miscellanea(ViewColumn):
                 if n > 0:
                     info.append("{0}{1}".format(n, slot[0].upper()))
             return "+ " + ", ".join(info), "Slot Modifiers"
-        elif itemGroup == "Energy Neutralizer":
+        elif (
+            itemGroup in ("Energy Neutralizer", "Structure Energy Neutralizer") or
+            (itemGroup == "Structure Burst Projector" and "doomsdayAOENeut" in item.effects)
+        ):
             neutAmount = stuff.getModifiedItemAttr("energyNeutralizerAmount")
-            cycleTime = stuff.cycleTime
+            cycleParams = stuff.getCycleParameters()
+            if cycleParams is None:
+                return "", None
+            cycleTime = cycleParams.averageTime
             if not neutAmount or not cycleTime:
                 return "", None
             capPerSec = float(-neutAmount) * 1000 / cycleTime
@@ -148,7 +148,10 @@ class Miscellanea(ViewColumn):
             return text, tooltip
         elif itemGroup == "Energy Nosferatu":
             neutAmount = stuff.getModifiedItemAttr("powerTransferAmount")
-            cycleTime = stuff.cycleTime
+            cycleParams = stuff.getCycleParameters()
+            if cycleParams is None:
+                return "", None
+            cycleTime = cycleParams.averageTime
             if not neutAmount or not cycleTime:
                 return "", None
             capPerSec = float(-neutAmount) * 1000 / cycleTime
@@ -170,28 +173,39 @@ class Miscellanea(ViewColumn):
             text = "{0} | {1}".format(formatAmount(strength, 3, 0, 3), formatAmount(coherence, 3, 0, 3))
             tooltip = "Virus strength and coherence"
             return text, tooltip
-        elif itemGroup in ("Warp Scrambler", "Warp Core Stabilizer"):
+        elif itemGroup in ("Warp Scrambler", "Warp Core Stabilizer", "Structure Warp Scrambler"):
             scramStr = stuff.getModifiedItemAttr("warpScrambleStrength")
             if not scramStr:
                 return "", None
             text = "{0}".format(formatAmount(-scramStr, 3, 0, 3, forceSign=True))
             tooltip = "Warp core strength modification"
             return text, tooltip
-        elif itemGroup in ("Stasis Web", "Stasis Webifying Drone"):
+        elif (
+            itemGroup in ("Stasis Web", "Stasis Webifying Drone", "Structure Stasis Webifier") or
+            (itemGroup == "Structure Burst Projector" and "doomsdayAOEWeb" in item.effects)
+        ):
             speedFactor = stuff.getModifiedItemAttr("speedFactor")
             if not speedFactor:
                 return "", None
             text = "{0}%".format(formatAmount(speedFactor, 3, 0, 3))
             tooltip = "Speed reduction"
             return text, tooltip
-        elif itemGroup == "Target Painter":
+        elif (
+            itemGroup == "Target Painter" or
+            (itemGroup == "Structure Disruption Battery" and "structureModuleEffectTargetPainter" in item.effects) or
+            (itemGroup == "Structure Burst Projector" and "doomsdayAOEPaint" in item.effects)
+        ):
             sigRadBonus = stuff.getModifiedItemAttr("signatureRadiusBonus")
             if not sigRadBonus:
                 return "", None
             text = "{0}%".format(formatAmount(sigRadBonus, 3, 0, 3, forceSign=True))
             tooltip = "Signature radius increase"
             return text, tooltip
-        elif itemGroup == "Sensor Dampener":
+        elif (
+            itemGroup == "Sensor Dampener" or
+            (itemGroup == "Structure Disruption Battery" and "structureModuleEffectRemoteSensorDampener" in item.effects) or
+            (itemGroup == "Structure Burst Projector" and "doomsdayAOEDamp" in item.effects)
+        ):
             lockRangeBonus = stuff.getModifiedItemAttr("maxTargetRangeBonus")
             scanResBonus = stuff.getModifiedItemAttr("scanResolutionBonus")
             if lockRangeBonus is None or scanResBonus is None:
@@ -210,7 +224,10 @@ class Miscellanea(ViewColumn):
                 ttEntries.append("scan resolution")
             tooltip = "{0} dampening".format(formatList(ttEntries)).capitalize()
             return text, tooltip
-        elif itemGroup == "Weapon Disruptor":
+        elif (
+            itemGroup in ("Weapon Disruptor", "Structure Disruption Battery") or
+            (itemGroup == "Structure Burst Projector" and "doomsdayAOETrack" in item.effects)
+        ):
             # Weapon disruption now covers both tracking and guidance (missile) disruptors
             # First get the attributes for tracking disruptors
             optimalRangeBonus = stuff.getModifiedItemAttr("maxRangeBonus")
@@ -239,25 +256,64 @@ class Miscellanea(ViewColumn):
 
             isGuidanceDisruptor = any([x is not None and x != 0 for x in list(guidanceDisruptorAttributes.values())])
 
-            if isTrackingDisruptor:
-                attributes = trackingDisruptorAttributes
-            elif isGuidanceDisruptor:
-                attributes = guidanceDisruptorAttributes
-            else:
+            if not isTrackingDisruptor and not isGuidanceDisruptor:
                 return "", None
 
-            display = max(list(attributes.values()), key=lambda x: abs(x))
+            texts = []
+            ttSegments = []
 
-            text = "{0}%".format(formatAmount(display, 3, 0, 3, forceSign=True))
-
-            ttEntries = []
-            for attributeName, attributeValue in list(attributes.items()):
-                if attributeValue == display:
-                    ttEntries.append(attributeName)
-
-            tooltip = "{0} disruption".format(formatList(ttEntries)).capitalize()
+            for status, attributes in ((isTrackingDisruptor, trackingDisruptorAttributes), (isGuidanceDisruptor, guidanceDisruptorAttributes)):
+                if not status:
+                    continue
+                display = max(list(attributes.values()), key=lambda x: abs(x))
+                texts.append("{0}%".format(formatAmount(display, 3, 0, 3, forceSign=True)))
+                ttEntries = []
+                for attributeName, attributeValue in list(attributes.items()):
+                    if abs(attributeValue) == abs(display):
+                        ttEntries.append(attributeName)
+                ttSegments.append("{0} disruption".format(formatList(ttEntries)).capitalize())
+            return ' | '.join(texts), '\n'.join(ttSegments)
+        elif itemGroup in (
+            "Gyrostabilizer",
+            "Magnetic Field Stabilizer",
+            "Heat Sink",
+            "Ballistic Control system",
+            "Structure Weapon Upgrade",
+            "Entropic Radiation Sink"
+        ):
+            attrMap = {
+                "Gyrostabilizer": ("damageMultiplier", "speedMultiplier", "Projectile weapon"),
+                "Magnetic Field Stabilizer": ("damageMultiplier", "speedMultiplier", "Hybrid weapon"),
+                "Heat Sink": ("damageMultiplier", "speedMultiplier", "Energy weapon"),
+                "Ballistic Control system": ("missileDamageMultiplierBonus", "speedMultiplier", "Missile"),
+                "Structure Weapon Upgrade": ("missileDamageMultiplierBonus", "speedMultiplier", "Missile"),
+                "Entropic Radiation Sink": ("damageMultiplier", "speedMultiplier", "Precursor weapon")}
+            dmgAttr, rofAttr, weaponName = attrMap[itemGroup]
+            dmg = stuff.getModifiedItemAttr(dmgAttr)
+            rof = stuff.getModifiedItemAttr(rofAttr)
+            if not dmg or not rof:
+                return "", None
+            texts = []
+            tooltips = []
+            cumulative = (dmg / rof - 1) * 100
+            texts.append("{}%".format(formatAmount(cumulative, 3, 0, 3, forceSign=True)))
+            tooltips.append("{} DPS boost".format(weaponName))
+            droneDmg = stuff.getModifiedItemAttr("droneDamageBonus")
+            if droneDmg:
+                texts.append("{}%".format(formatAmount(droneDmg, 3, 0, 3, forceSign=True)))
+                tooltips.append("drone DPS boost".format(weaponName))
+            return ' | '.join(texts), ' and '.join(tooltips)
+        elif itemGroup == "Drone Damage Modules":
+            dmg = stuff.getModifiedItemAttr("droneDamageBonus")
+            if not dmg:
+                return
+            text = "{}%".format(formatAmount(dmg, 3, 0, 3, forceSign=True))
+            tooltip = "Drone DPS boost"
             return text, tooltip
-        elif itemGroup in ("ECM", "Burst Jammer", "Burst Projectors"):
+        elif (
+            itemGroup in ("ECM", "Burst Jammer", "Burst Projectors", "Structure ECM Battery") or
+            (itemGroup == "Structure Burst Projector" and "doomsdayAOEECM" in item.effects)
+        ):
             grav = stuff.getModifiedItemAttr("scanGravimetricStrengthBonus")
             ladar = stuff.getModifiedItemAttr("scanLadarStrengthBonus")
             radar = stuff.getModifiedItemAttr("scanRadarStrengthBonus")
@@ -332,21 +388,20 @@ class Miscellanea(ViewColumn):
             tooltip = "Sensor recalibration time"
             return text, tooltip
         elif itemGroup == "Remote Armor Repairer":
-            rps = stuff.getRemoteReps(ignoreState=True)[1]
+            rps = stuff.getRemoteReps(ignoreState=True).armor
             if not rps:
                 return "", None
             text = "{0}/s".format(formatAmount(rps, 3, 0, 3, forceSign=True))
             tooltip = "Armor repaired per second"
             return text, tooltip
         elif itemGroup == "Mutadaptive Remote Armor Repairer":
-            # TODO: fetch spoolup option
-            defaultSpoolValue = 1
+            defaultSpoolValue = eos.config.settings['globalDefaultSpoolupPercentage']
             spoolOptDefault = SpoolOptions(SpoolType.SCALE, defaultSpoolValue, False)
             spoolOptPre = SpoolOptions(SpoolType.SCALE, 0, True)
             spoolOptFull = SpoolOptions(SpoolType.SCALE, 1, True)
-            rrType, rps = stuff.getRemoteReps(spoolOptions=spoolOptDefault, ignoreState=True)
-            rrTypePre, rpsPre = stuff.getRemoteReps(spoolOptions=spoolOptPre, ignoreState=True)
-            rrTypeFull, rpsFull = stuff.getRemoteReps(spoolOptions=spoolOptFull, ignoreState=True)
+            rps = stuff.getRemoteReps(spoolOptions=spoolOptDefault, ignoreState=True).armor
+            rpsPre = stuff.getRemoteReps(spoolOptions=spoolOptPre, ignoreState=True).armor
+            rpsFull = stuff.getRemoteReps(spoolOptions=spoolOptFull, ignoreState=True).armor
             if not rps:
                 return "", None
             text = []
@@ -369,21 +424,21 @@ class Miscellanea(ViewColumn):
                     formatAmount(spoolTimeFull - spoolTimePre, 3, 0, 3))
             return text, tooltip
         elif itemGroup == "Remote Shield Booster":
-            rps = stuff.getRemoteReps(ignoreState=True)[1]
+            rps = stuff.getRemoteReps(ignoreState=True).shield
             if not rps:
                 return "", None
             text = "{0}/s".format(formatAmount(rps, 3, 0, 3, forceSign=True))
             tooltip = "Shield transferred per second"
             return text, tooltip
         elif itemGroup == "Remote Capacitor Transmitter":
-            rps = stuff.getRemoteReps(ignoreState=True)[1]
+            rps = stuff.getRemoteReps(ignoreState=True).capacitor
             if not rps:
                 return "", None
             text = "{0}/s".format(formatAmount(rps, 3, 0, 3, forceSign=True))
             tooltip = "Energy transferred per second"
             return text, tooltip
         elif itemGroup == "Remote Hull Repairer":
-            rps = stuff.getRemoteReps(ignoreState=True)[1]
+            rps = stuff.getRemoteReps(ignoreState=True).hull
             if not rps:
                 return "", None
             text = "{0}/s".format(formatAmount(rps, 3, 0, 3, forceSign=True))
@@ -484,11 +539,22 @@ class Miscellanea(ViewColumn):
             tooltip = "Mining Yield per second ({0} per hour)".format(formatAmount(minePerSec * 3600, 3, 0, 3))
             return text, tooltip
         elif itemGroup == "Logistic Drone":
-            repType, rps = stuff.getRemoteReps(ignoreState=True)
-            if not repType:
+            rpsData = stuff.getRemoteReps(ignoreState=True)
+            rrType = None
+            rps = None
+            if rpsData.shield:
+                rps = rpsData.shield
+                rrType = 'Shield'
+            elif rpsData.armor:
+                rps = rpsData.armor
+                rrType = 'Armor'
+            elif rpsData.hull:
+                rps = rpsData.hull
+                rrType = 'Hull'
+            if not rrType or not rps:
                 return "", None
             text = "{}/s".format(formatAmount(rps, 3, 0, 3))
-            tooltip = "{} HP repaired per second\n{} HP/s per drone".format(repType, formatAmount(rps / stuff.amount, 3, 0, 3))
+            tooltip = "{} HP repaired per second\n{} HP/s per drone".format(rrType, formatAmount(rps / stuff.amount, 3, 0, 3))
             return text, tooltip
         elif itemGroup == "Energy Neutralizer Drone":
             neutAmount = stuff.getModifiedItemAttr("energyNeutralizerAmount")
@@ -499,9 +565,9 @@ class Miscellanea(ViewColumn):
             text = "{0}/s".format(formatAmount(capPerSec, 3, 0, 3))
             tooltip = "Energy neutralization per second"
             return text, tooltip
-        elif itemGroup == "Micro Jump Drive":
+        elif itemGroup in ("Micro Jump Drive", "Micro Jump Field Generators"):
             cycleTime = stuff.getModifiedItemAttr("duration") / 1000
-            text = "{0}s".format(cycleTime)
+            text = "{0}s".format(formatAmount(cycleTime, 3, 0, 3))
             tooltip = "Spoolup time"
             return text, tooltip
         elif itemGroup in ("Siege Module", "Cynosural Field Generator"):
@@ -608,7 +674,7 @@ class Miscellanea(ViewColumn):
                                                 formatAmount(aoeVelocity, 3, 0, 3), "m/s")
                 tooltip = "Explosion radius and explosion velocity"
                 return text, tooltip
-            elif chargeGroup == "Bomb":
+            elif chargeGroup in ("Bomb", "Structure Guided Bomb"):
                 cloudSize = stuff.getModifiedChargeAttr("aoeCloudSize")
                 if not cloudSize:
                     return "", None

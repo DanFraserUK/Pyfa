@@ -18,8 +18,8 @@
 # =============================================================================
 
 
-from eos.db.gamedata.queries import getAttributeInfo
-from gui.utils.numberFormatter import roundToPrec
+from eos.db.gamedata.queries import getAttributeInfo, getDynamicItem
+from eos.utils.float import floatUnerr
 from service.port.shared import fetchItem
 
 
@@ -31,9 +31,8 @@ def renderMutant(mutant, firstPrefix='', prefix=''):
         mutatedAttrs[attrName] = mutator.value
     exportLines.append('{}{}'.format(firstPrefix, mutant.baseItem.name))
     exportLines.append('{}{}'.format(prefix, mutant.mutaplasmid.item.name))
-    # Round to 7th significant number to avoid exporting float errors
     customAttrsLine = ', '.join(
-        '{} {}'.format(a, roundToPrec(mutatedAttrs[a], 7))
+        '{} {}'.format(a, floatUnerr(mutatedAttrs[a]))
         for a in sorted(mutatedAttrs))
     exportLines.append('{}{}'.format(prefix, customAttrsLine))
     return '\n'.join(exportLines)
@@ -42,27 +41,28 @@ def renderMutant(mutant, firstPrefix='', prefix=''):
 def parseMutant(lines):
     # Fetch base item type
     try:
-        baseName = lines[0]
+        baseItemName = lines[0]
     except IndexError:
         return None
-    baseType = fetchItem(baseName.strip())
-    if baseType is None:
+    baseItem = fetchItem(baseItemName.strip())
+    if baseItem is None:
         return None, None, {}
     # Fetch mutaplasmid item type and actual item
     try:
-        mutaName = lines[1]
+        mutaplasmidName = lines[1]
     except IndexError:
-        return baseType, None, {}
-    mutaType = fetchItem(mutaName.strip())
-    if mutaType is None:
-        return baseType, None, {}
+        return baseItem, None, {}
+    mutaplasmidItem = fetchItem(mutaplasmidName.strip())
+    if mutaplasmidItem is None:
+        return baseItem, None, {}
+    mutaplasmidItem = getDynamicItem(mutaplasmidItem.ID)
     # Process mutated attribute values
     try:
-        mutaAttrsLine = lines[2]
+        mutationsLine = lines[2]
     except IndexError:
-        return baseType, mutaType, {}
-    mutaAttrs = {}
-    pairs = [p.strip() for p in mutaAttrsLine.split(',')]
+        return baseItem, mutaplasmidItem, {}
+    mutations = {}
+    pairs = [p.strip() for p in mutationsLine.split(',')]
     for pair in pairs:
         try:
             attrName, value = pair.split(' ')
@@ -75,5 +75,5 @@ def parseMutant(lines):
         attrInfo = getAttributeInfo(attrName.strip())
         if attrInfo is None:
             continue
-        mutaAttrs[attrInfo.ID] = value
-    return baseType, mutaType, mutaAttrs
+        mutations[attrInfo.ID] = value
+    return baseItem, mutaplasmidItem, mutations

@@ -1,18 +1,16 @@
 # noinspection PyPackageRequirements
 import wx
-from wx.lib.intctrl import IntCtrl
 
-from gui.preferenceView import PreferenceView
-from gui.bitmap_loader import BitmapLoader
-
-import gui.mainFrame
 import gui.globalEvents as GE
-from service.settings import SettingsProvider
+import gui.mainFrame
+from gui.bitmap_loader import BitmapLoader
+from gui.preferenceView import PreferenceView
 from service.fit import Fit
-from service.price import Price
+from service.settings import SettingsProvider
 
 
 class PFGeneralPref(PreferenceView):
+
     title = "General"
 
     def populatePanel(self, panel):
@@ -21,14 +19,13 @@ class PFGeneralPref(PreferenceView):
         self.openFitsSettings = SettingsProvider.getInstance().getSettings("pyfaPrevOpenFits",
                                                                            {"enabled": False, "pyfaOpenFits": []})
 
-        helpCursor = wx.Cursor(wx.CURSOR_QUESTION_ARROW)
-
         mainSizer = wx.BoxSizer(wx.VERTICAL)
 
         self.stTitle = wx.StaticText(panel, wx.ID_ANY, self.title, wx.DefaultPosition, wx.DefaultSize, 0)
         self.stTitle.Wrap(-1)
         self.stTitle.SetFont(wx.Font(12, 70, 90, 90, False, wx.EmptyString))
 
+        helpCursor = wx.Cursor(wx.CURSOR_QUESTION_ARROW)
         mainSizer.Add(self.stTitle, 0, wx.ALL, 5)
 
         self.m_staticline1 = wx.StaticLine(panel, wx.ID_ANY, wx.DefaultPosition, wx.DefaultSize, wx.LI_HORIZONTAL)
@@ -66,12 +63,8 @@ class PFGeneralPref(PreferenceView):
         labelSizer.Add(self.cbRackLabels, 0, wx.ALL | wx.EXPAND, 5)
         mainSizer.Add(labelSizer, 0, wx.LEFT | wx.EXPAND, 30)
 
-        self.cbShowTooltip = wx.CheckBox(panel, wx.ID_ANY, "Show tab tooltips", wx.DefaultPosition, wx.DefaultSize, 0)
+        self.cbShowTooltip = wx.CheckBox(panel, wx.ID_ANY, "Show fitting tab tooltips", wx.DefaultPosition, wx.DefaultSize, 0)
         mainSizer.Add(self.cbShowTooltip, 0, wx.ALL | wx.EXPAND, 5)
-
-        self.cbMarketShortcuts = wx.CheckBox(panel, wx.ID_ANY, "Show market shortcuts", wx.DefaultPosition,
-                                             wx.DefaultSize, 0)
-        mainSizer.Add(self.cbMarketShortcuts, 0, wx.ALL | wx.EXPAND, 5)
 
         self.cbGaugeAnimation = wx.CheckBox(panel, wx.ID_ANY, "Animate gauges", wx.DefaultPosition, wx.DefaultSize, 0)
         mainSizer.Add(self.cbGaugeAnimation, 0, wx.ALL | wx.EXPAND, 5)
@@ -84,37 +77,14 @@ class PFGeneralPref(PreferenceView):
                                           wx.DefaultPosition, wx.DefaultSize, 0)
         mainSizer.Add(self.cbShowShipBrowserTooltip, 0, wx.ALL | wx.EXPAND, 5)
 
-        priceSizer = wx.BoxSizer(wx.HORIZONTAL)
 
-        self.stDefaultSystem = wx.StaticText(panel, wx.ID_ANY, "Default Market Prices:", wx.DefaultPosition, wx.DefaultSize, 0)
-        self.stDefaultSystem.Wrap(-1)
-        priceSizer.Add(self.stDefaultSystem, 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 5)
-        self.stDefaultSystem.SetCursor(helpCursor)
-        self.stDefaultSystem.SetToolTip(
-            wx.ToolTip('The source you choose will be tried first, but subsequent sources will be used if the preferred '
-                       'source fails. The system you choose is absolute and requests will not be made against other systems.'))
-
-        self.chPriceSource = wx.Choice(panel, choices=sorted(Price.sources.keys()))
-        self.chPriceSystem = wx.Choice(panel, choices=list(Price.systemsList.keys()))
-        priceSizer.Add(self.chPriceSource, 1, wx.ALL | wx.EXPAND, 5)
-        priceSizer.Add(self.chPriceSystem, 1, wx.ALL | wx.EXPAND, 5)
-
-        mainSizer.Add(priceSizer, 0, wx.ALL | wx.EXPAND, 0)
-
-        delayTimer = wx.BoxSizer(wx.HORIZONTAL)
-
-        self.stMarketDelay = wx.StaticText(panel, wx.ID_ANY, "Market Search Delay (ms):", wx.DefaultPosition, wx.DefaultSize, 0)
-        self.stMarketDelay.Wrap(-1)
-        self.stMarketDelay.SetCursor(helpCursor)
-        self.stMarketDelay.SetToolTip(
-            wx.ToolTip('The delay between a keystroke and the market search. Can help reduce lag when typing fast in the market search box.'))
-
-        delayTimer.Add(self.stMarketDelay, 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 5)
-
-        self.intDelay = IntCtrl(panel, max=1000, limited=True)
-        delayTimer.Add(self.intDelay, 0, wx.ALL, 5)
-
-        mainSizer.Add(delayTimer, 0, wx.ALL | wx.EXPAND, 0)
+        self.cbReloadAll = wx.CheckBox(panel, wx.ID_ANY, "Change charge in all modules of the same type",
+                                       wx.DefaultPosition, wx.DefaultSize, 0)
+        if "wxGTK" not in wx.PlatformInfo:
+            self.cbReloadAll.SetCursor(helpCursor)
+        self.cbReloadAll.SetToolTip(wx.ToolTip(
+            'When disabled, reloads charges just in selected modules. Action can be reversed by holding Ctrl or Alt key while changing charge.'))
+        mainSizer.Add(self.cbReloadAll, 0, wx.ALL | wx.EXPAND, 5)
 
         self.sFit = Fit.getInstance()
 
@@ -127,13 +97,10 @@ class PFGeneralPref(PreferenceView):
         self.cbCompactSkills.SetValue(self.sFit.serviceFittingOptions["compactSkills"] or False)
         self.cbReopenFits.SetValue(self.openFitsSettings["enabled"])
         self.cbShowTooltip.SetValue(self.sFit.serviceFittingOptions["showTooltip"] or False)
-        self.cbMarketShortcuts.SetValue(self.sFit.serviceFittingOptions["showMarketShortcuts"] or False)
         self.cbGaugeAnimation.SetValue(self.sFit.serviceFittingOptions["enableGaugeAnimation"])
         self.cbOpenFitInNew.SetValue(self.sFit.serviceFittingOptions["openFitInNew"])
-        self.chPriceSource.SetStringSelection(self.sFit.serviceFittingOptions["priceSource"])
-        self.chPriceSystem.SetStringSelection(self.sFit.serviceFittingOptions["priceSystem"])
         self.cbShowShipBrowserTooltip.SetValue(self.sFit.serviceFittingOptions["showShipBrowserTooltip"])
-        self.intDelay.SetValue(self.sFit.serviceFittingOptions["marketSearchDelay"])
+        self.cbReloadAll.SetValue(self.sFit.serviceFittingOptions["ammoChangeAll"])
 
         self.cbGlobalChar.Bind(wx.EVT_CHECKBOX, self.OnCBGlobalCharStateChange)
         self.cbDefaultCharImplants.Bind(wx.EVT_CHECKBOX, self.OnCBDefaultCharImplantsStateChange)
@@ -144,28 +111,28 @@ class PFGeneralPref(PreferenceView):
         self.cbCompactSkills.Bind(wx.EVT_CHECKBOX, self.onCBCompactSkills)
         self.cbReopenFits.Bind(wx.EVT_CHECKBOX, self.onCBReopenFits)
         self.cbShowTooltip.Bind(wx.EVT_CHECKBOX, self.onCBShowTooltip)
-        self.cbMarketShortcuts.Bind(wx.EVT_CHECKBOX, self.onCBShowShortcuts)
         self.cbGaugeAnimation.Bind(wx.EVT_CHECKBOX, self.onCBGaugeAnimation)
         self.cbOpenFitInNew.Bind(wx.EVT_CHECKBOX, self.onCBOpenFitInNew)
-        self.chPriceSource.Bind(wx.EVT_CHOICE, self.onPricesSourceSelection)
-        self.chPriceSystem.Bind(wx.EVT_CHOICE, self.onPriceSelection)
         self.cbShowShipBrowserTooltip.Bind(wx.EVT_CHECKBOX, self.onCBShowShipBrowserTooltip)
-        self.intDelay.Bind(wx.lib.intctrl.EVT_INT, self.onMarketDelayChange)
+        self.cbReloadAll.Bind(wx.EVT_CHECKBOX, self.onCBReloadAll)
 
         self.cbRackLabels.Enable(self.sFit.serviceFittingOptions["rackSlots"] or False)
 
         panel.SetSizer(mainSizer)
         panel.Layout()
 
-    def onMarketDelayChange(self, event):
-        self.sFit.serviceFittingOptions["marketSearchDelay"] = self.intDelay.GetValue()
-        event.Skip()
-
     def onCBGlobalColorBySlot(self, event):
+        # todo: maybe create a SettingChanged event that we can fire, and have other things hook into, instead of having the preference panel itself handle the
+        # updating of things related to settings.
         self.sFit.serviceFittingOptions["colorFitBySlot"] = self.cbFitColorSlots.GetValue()
         fitID = self.mainFrame.getActiveFit()
         self.sFit.refreshFit(fitID)
-        wx.PostEvent(self.mainFrame, GE.FitChanged(fitID=fitID))
+
+        iView = self.mainFrame.marketBrowser.itemView
+        if iView.active:
+            iView.update(iView.active)
+
+        wx.PostEvent(self.mainFrame, GE.FitChanged(fitIDs=(fitID,)))
         event.Skip()
 
     def onCBGlobalRackSlots(self, event):
@@ -173,14 +140,14 @@ class PFGeneralPref(PreferenceView):
         self.cbRackLabels.Enable(self.cbRackSlots.GetValue())
         fitID = self.mainFrame.getActiveFit()
         self.sFit.refreshFit(fitID)
-        wx.PostEvent(self.mainFrame, GE.FitChanged(fitID=fitID))
+        wx.PostEvent(self.mainFrame, GE.FitChanged(fitIDs=(fitID,)))
         event.Skip()
 
     def onCBGlobalRackLabels(self, event):
         self.sFit.serviceFittingOptions["rackLabels"] = self.cbRackLabels.GetValue()
         fitID = self.mainFrame.getActiveFit()
         self.sFit.refreshFit(fitID)
-        wx.PostEvent(self.mainFrame, GE.FitChanged(fitID=fitID))
+        wx.PostEvent(self.mainFrame, GE.FitChanged(fitIDs=(fitID,)))
         event.Skip()
 
     def OnCBGlobalCharStateChange(self, event):
@@ -199,7 +166,7 @@ class PFGeneralPref(PreferenceView):
         self.sFit.serviceFittingOptions["compactSkills"] = self.cbCompactSkills.GetValue()
         fitID = self.mainFrame.getActiveFit()
         self.sFit.refreshFit(fitID)
-        wx.PostEvent(self.mainFrame, GE.FitChanged(fitID=fitID))
+        wx.PostEvent(self.mainFrame, GE.FitChanged(fitIDs=(fitID,)))
         event.Skip()
 
     def onCBReopenFits(self, event):
@@ -207,9 +174,6 @@ class PFGeneralPref(PreferenceView):
 
     def onCBShowTooltip(self, event):
         self.sFit.serviceFittingOptions["showTooltip"] = self.cbShowTooltip.GetValue()
-
-    def onCBShowShortcuts(self, event):
-        self.sFit.serviceFittingOptions["showMarketShortcuts"] = self.cbMarketShortcuts.GetValue()
 
     def onCBGaugeAnimation(self, event):
         self.sFit.serviceFittingOptions["enableGaugeAnimation"] = self.cbGaugeAnimation.GetValue()
@@ -220,22 +184,11 @@ class PFGeneralPref(PreferenceView):
     def onCBShowShipBrowserTooltip(self, event):
         self.sFit.serviceFittingOptions["showShipBrowserTooltip"] = self.cbShowShipBrowserTooltip.GetValue()
 
+    def onCBReloadAll(self, event):
+        self.sFit.serviceFittingOptions["ammoChangeAll"] = self.cbReloadAll.GetValue()
+
     def getImage(self):
         return BitmapLoader.getBitmap("prefs_settings", "gui")
-
-    def onPriceSelection(self, event):
-        system = self.chPriceSystem.GetString(self.chPriceSystem.GetSelection())
-        self.sFit.serviceFittingOptions["priceSystem"] = system
-
-        fitID = self.mainFrame.getActiveFit()
-
-        self.sFit.refreshFit(fitID)
-        wx.PostEvent(self.mainFrame, GE.FitChanged(fitID=fitID))
-        event.Skip()
-
-    def onPricesSourceSelection(self, event):
-        source = self.chPriceSource.GetString(self.chPriceSource.GetSelection())
-        self.sFit.serviceFittingOptions["priceSource"] = source
 
 
 PFGeneralPref.register()

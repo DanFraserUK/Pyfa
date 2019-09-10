@@ -23,21 +23,28 @@ from collections import OrderedDict
 
 from logbook import Logger
 
+from eos.const import FittingModuleState, FittingSlot
 from eos.saveddata.cargo import Cargo
 from eos.saveddata.citadel import Citadel
 from eos.saveddata.drone import Drone
 from eos.saveddata.fighter import Fighter
 from eos.saveddata.fit import Fit
-from eos.saveddata.module import Module, State, Slot
+from eos.saveddata.module import Module
 from eos.saveddata.ship import Ship
+from gui.fitCommands.helpers import activeStateLimit
+from service.const import PortDnaOptions
 from service.fit import Fit as svcFit
 from service.market import Market
 
 
 pyfalog = Logger(__name__)
 
+DNA_OPTIONS = (
+    (PortDnaOptions.FORMATTING, 'Formatting Tags', 'Include formatting tags to paste fit directly into corp bulletins, MOTD, etc.', True),
+)
 
-def importDna(string):
+
+def importDna(string, fitName=None):
     sMkt = Market.getInstance()
 
     ids = list(map(int, re.findall(r'\d+', string)))
@@ -64,7 +71,10 @@ def importDna(string):
             f.ship = Ship(sMkt.getItem(int(info[0])))
         except ValueError:
             f.ship = Citadel(sMkt.getItem(int(info[0])))
-        f.name = "{0} - DNA Imported".format(f.ship.item.name)
+        if fitName is None:
+            f.name = "{0} - DNA Imported".format(f.ship.item.name)
+        else:
+            f.name = fitName
     except UnicodeEncodeError:
         def logtransform(s_):
             if len(s_) > 10:
@@ -106,32 +116,33 @@ def importDna(string):
                             f.modules.append(m)
                     else:
                         m.owner = f
-                        if m.isValidState(State.ACTIVE):
-                            m.state = State.ACTIVE
+                        if m.isValidState(FittingModuleState.ACTIVE):
+                            m.state = activeStateLimit(m.item)
                         moduleList.append(m)
 
     # Recalc to get slot numbers correct for T3 cruisers
-    svcFit.getInstance().recalc(f)
+    sFit = svcFit.getInstance()
+    sFit.recalc(f)
+    sFit.fill(f)
 
     for module in moduleList:
         if module.fits(f):
             module.owner = f
-            if module.isValidState(State.ACTIVE):
-                module.state = State.ACTIVE
+            if module.isValidState(FittingModuleState.ACTIVE):
+                module.state = activeStateLimit(module.item)
             f.modules.append(module)
 
     return f
 
 
-def exportDna(fit):
+def exportDna(fit, options, callback):
     dna = str(fit.shipID)
     subsystems = []  # EVE cares which order you put these in
     mods = OrderedDict()
     charges = OrderedDict()
-    sFit = svcFit.getInstance()
     for mod in fit.modules:
         if not mod.isEmpty:
-            if mod.slot == Slot.SUBSYSTEM:
+            if mod.slot == FittingSlot.SUBSYSTEM:
                 subsystems.append(mod)
                 continue
             if mod.itemID not in mods:
@@ -154,10 +165,7 @@ def exportDna(fit):
         dna += ":{0};{1}".format(drone.itemID, drone.amount)
 
     for fighter in fit.fighters:
-        dna += ":{0};{1}".format(fighter.itemID, fighter.amountActive)
-
-    for fighter in fit.fighters:
-        dna += ":{0};{1}".format(fighter.itemID, fighter.amountActive)
+        dna += ":{0};{1}".format(fighter.itemID, fighter.amount)
 
     for cargo in fit.cargo:
         # DNA format is a simple/dumb format. As CCP uses the slot information of the item itself
@@ -173,4 +181,12 @@ def exportDna(fit):
     for charge in charges:
         dna += ":{0};{1}".format(charge, charges[charge])
 
-    return dna + "::"
+    text = dna + "::"
+
+    if options[PortDnaOptions.FORMATTING]:
+        text = '<url=fitting:{}>{}</url>'.format(text, fit.name)
+
+    if callback:
+        callback(text)
+    else:
+        return text

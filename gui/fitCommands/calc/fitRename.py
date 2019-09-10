@@ -1,26 +1,30 @@
 import wx
 from logbook import Logger
 
-import eos.db
+from service.fit import Fit
+
 
 pyfalog = Logger(__name__)
 
 
-class FitRenameCommand(wx.Command):
-    def __init__(self, fitID, newName):
-        wx.Command.__init__(self, True, "FitRename")
+class CalcFitRenameCommand(wx.Command):
+
+    def __init__(self, fitID, name):
+        wx.Command.__init__(self, True, 'Rename Fit')
         self.fitID = fitID
-        self.newName = newName
-        self.oldName = None
+        self.name = name
+        self.savedName = None
 
     def Do(self):
-        pyfalog.debug("Renaming fit ({0}) to: {1}", self.fitID, self.newName)
-        fit = eos.db.getFit(self.fitID)
-        self.oldName = fit.name
-        fit.name = self.newName
-        eos.db.commit()
+        pyfalog.debug('Doing renaming of fit {} to {}'.format(self.fitID, self.name))
+        fit = Fit.getInstance().getFit(self.fitID, basic=True)
+        if fit.name == self.name:
+            return False
+        self.savedName = fit.name
+        fit.name = self.name
         return True
 
     def Undo(self):
-        cmd = FitRenameCommand(self.fitID, self.oldName)
+        pyfalog.debug('Undoing renaming of fit {} to {}'.format(self.fitID, self.name))
+        cmd = CalcFitRenameCommand(fitID=self.fitID, name=self.savedName)
         return cmd.Do()

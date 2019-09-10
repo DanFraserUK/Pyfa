@@ -22,16 +22,18 @@ from eos.modifiedAttributeDict import ModifiedAttributeDict, ItemAttrShortcut
 
 
 class Mode(ItemAttrShortcut, HandledItem):
-    def __init__(self, item):
 
+
+    def __init__(self, item, owner=None):
         if item.group.name != "Ship Modifiers":
             raise ValueError(
                     'Passed item "%s" (category: (%s)) is not a Ship Modifier' % (item.name, item.category.name))
-
+        self.owner = owner
         self.__item = item
         self.__itemModifiedAttributes = ModifiedAttributeDict()
         self.__itemModifiedAttributes.original = self.item.attributes
         self.__itemModifiedAttributes.overrides = self.item.overrides
+
 
     @property
     def item(self):
@@ -53,3 +55,12 @@ class Mode(ItemAttrShortcut, HandledItem):
             for effect in self.item.effects.values():
                 if effect.runTime == runTime and effect.activeByDefault:
                     effect.handler(fit, self, context=("module",))
+
+    def __deepcopy__(self, memo):
+        copy = Mode(self.item)
+        return copy
+
+    def __repr__(self):
+        return "Mode(ID={}, name={}) at {}".format(
+                self.item.ID, self.item.name, hex(id(self))
+        )

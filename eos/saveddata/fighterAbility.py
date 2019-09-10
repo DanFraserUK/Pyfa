@@ -26,7 +26,7 @@ from eos.utils.stats import DmgTypes
 pyfalog = Logger(__name__)
 
 
-class FighterAbility(object):
+class FighterAbility:
 
     # We aren't able to get data on the charges that can be stored with fighters. So we hardcode that data here, keyed
     # with the fighter squadron role
@@ -73,7 +73,7 @@ class FighterAbility(object):
 
     @property
     def name(self):
-        return self.__effect.getattr('displayName') or self.__effect.handlerName
+        return self.__effect.getattr('displayName') or self.__effect.name
 
     @property
     def attrPrefix(self):
@@ -95,8 +95,15 @@ class FighterAbility(object):
 
     @property
     def reloadTime(self):
+        return self.getReloadTime()
+
+    def getReloadTime(self, spentShots=None):
+        if spentShots is not None:
+            spentShots = max(self.numShots, spentShots)
+        else:
+            spentShots = self.numShots
         rearm_time = (self.REARM_TIME_MAPPING[self.fighter.getModifiedItemAttr("fighterSquadronRole")] or 0 if self.hasCharges else 0)
-        return self.fighter.getModifiedItemAttr("fighterRefuelingTime") + rearm_time * self.numShots
+        return self.fighter.getModifiedItemAttr("fighterRefuelingTime") + rearm_time * spentShots
 
     @property
     def numShots(self):
@@ -105,20 +112,9 @@ class FighterAbility(object):
     @property
     def cycleTime(self):
         speed = self.fighter.getModifiedItemAttr("{}Duration".format(self.attrPrefix))
-
-        # Factor in reload
-        '''
-        reload = self.reloadTime
-
-        if self.fighter.owner.factorReload:
-            numShots = self.numShots
-            # Speed here already takes into consideration reactivation time
-            speed = (speed * numShots + reload) / numShots if numShots > 0 else speed
-        '''
-
         return speed
 
-    def getVolley(self, targetResists=None):
+    def getVolley(self, targetProfile=None):
         if not self.dealsDamage or not self.active:
             return DmgTypes(0, 0, 0, 0)
         if self.attrPrefix == "fighterAbilityLaunchBomb":
@@ -131,19 +127,20 @@ class FighterAbility(object):
             therm = self.fighter.getModifiedItemAttr("{}DamageTherm".format(self.attrPrefix), 0)
             kin = self.fighter.getModifiedItemAttr("{}DamageKin".format(self.attrPrefix), 0)
             exp = self.fighter.getModifiedItemAttr("{}DamageExp".format(self.attrPrefix), 0)
-        dmgMult = self.fighter.amountActive * self.fighter.getModifiedItemAttr("{}DamageMultiplier".format(self.attrPrefix), 1)
+        dmgMult = self.fighter.amount * self.fighter.getModifiedItemAttr("{}DamageMultiplier".format(self.attrPrefix), 1)
         volley = DmgTypes(
-            em=em * dmgMult * (1 - getattr(targetResists, "emAmount", 0)),
-            thermal=therm * dmgMult * (1 - getattr(targetResists, "thermalAmount", 0)),
-            kinetic=kin * dmgMult * (1 - getattr(targetResists, "kineticAmount", 0)),
-            explosive=exp * dmgMult * (1 - getattr(targetResists, "explosiveAmount", 0)))
+            em=em * dmgMult * (1 - getattr(targetProfile, "emAmount", 0)),
+            thermal=therm * dmgMult * (1 - getattr(targetProfile, "thermalAmount", 0)),
+            kinetic=kin * dmgMult * (1 - getattr(targetProfile, "kineticAmount", 0)),
+            explosive=exp * dmgMult * (1 - getattr(targetProfile, "explosiveAmount", 0)))
         return volley
 
-    def getDps(self, targetResists=None):
-        volley = self.getVolley(targetResists=targetResists)
+    def getDps(self, targetProfile=None, cycleTimeOverride=None):
+        volley = self.getVolley(targetProfile=targetProfile)
         if not volley:
             return DmgTypes(0, 0, 0, 0)
-        dpsFactor = 1 / (self.cycleTime / 1000)
+        cycleTime = cycleTimeOverride if cycleTimeOverride is not None else self.cycleTime
+        dpsFactor = 1 / (cycleTime / 1000)
         dps = DmgTypes(
             em=volley.em * dpsFactor,
             thermal=volley.thermal * dpsFactor,
@@ -152,5 +149,4 @@ class FighterAbility(object):
         return dps
 
     def clear(self):
-        self.__dps = None
-        self.__volley = None
+        pass

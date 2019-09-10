@@ -24,8 +24,9 @@ from gui.bitmap_loader import BitmapLoader
 
 
 class PreferenceDialog(wx.Dialog):
+
     def __init__(self, parent):
-        wx.Dialog.__init__(self, parent, id=wx.ID_ANY, size=wx.DefaultSize, style=wx.DEFAULT_DIALOG_STYLE)
+        super().__init__(parent, id=wx.ID_ANY, size=wx.DefaultSize, style=wx.DEFAULT_DIALOG_STYLE)
         self.SetTitle("pyfa - Preferences")
         i = wx.Icon(BitmapLoader.getBitmap("preferences_small", "gui"))
         self.SetIcon(i)
@@ -56,7 +57,7 @@ class PreferenceDialog(wx.Dialog):
 
         for prefView in PreferenceView.views:
             page = wx.ScrolledWindow(self.listbook)
-            page.SetScrollbars(1, 1, 20, 20)
+            page.SetScrollRate(15, 15)
             bmp = prefView.getImage()
             if bmp:
                 imgID = self.imageList.Add(bmp)
@@ -66,16 +67,23 @@ class PreferenceDialog(wx.Dialog):
 
             self.listbook.AddPage(page, prefView.title, imageId=imgID)
 
-        minHeight = 550
         bestFit = self.GetBestVirtualSize()
-        if minHeight > bestFit[1]:
-            self.SetSize(650, minHeight)
-        else:
-            self.SetSize(650, bestFit[1])
+        width = max(bestFit[0], 800 if "wxGTK" in wx.PlatformInfo else 650)
+        height = max(bestFit[1], 550)
+        self.SetSize(width, height)
 
         self.Layout()
 
+        self.Bind(wx.EVT_CHAR_HOOK, self.kbEvent)
         self.btnOK.Bind(wx.EVT_BUTTON, self.OnBtnOK)
 
     def OnBtnOK(self, event):
         self.Close()
+
+    def kbEvent(self, event):
+        keycode = event.GetKeyCode()
+        mstate = wx.GetMouseState()
+        if keycode == wx.WXK_ESCAPE and mstate.GetModifiers() == wx.MOD_NONE:
+            self.Close()
+            return
+        event.Skip()

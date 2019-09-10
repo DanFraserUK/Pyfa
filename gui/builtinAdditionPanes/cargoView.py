@@ -19,14 +19,14 @@
 
 # noinspection PyPackageRequirements
 import wx
+
 import gui.display as d
-from gui.builtinViewColumns.state import State
-from gui.contextMenu import ContextMenu
+import gui.fitCommands as cmd
 import gui.globalEvents as GE
+from gui.contextMenu import ContextMenu
 from gui.utils.staticHelpers import DragDropHelper
 from service.fit import Fit
 from service.market import Market
-import gui.fitCommands as cmd
 
 
 class CargoViewDrop(wx.DropTarget):
@@ -53,21 +53,18 @@ class CargoView(d.Display):
                     "Price"]
 
     def __init__(self, parent):
-        d.Display.__init__(self, parent, style=wx.LC_SINGLE_SEL | wx.BORDER_NONE)
+        d.Display.__init__(self, parent, style=wx.BORDER_NONE)
 
         self.lastFitId = None
 
         self.mainFrame.Bind(GE.FIT_CHANGED, self.fitChanged)
-        self.Bind(wx.EVT_LEFT_DCLICK, self.removeItem)
+        self.Bind(wx.EVT_LEFT_DCLICK, self.onLeftDoubleClick)
         self.Bind(wx.EVT_KEY_UP, self.kbEvent)
 
         self.SetDropTarget(CargoViewDrop(self.handleListDrag))
         self.Bind(wx.EVT_LIST_BEGIN_DRAG, self.startDrag)
 
-        if "__WXGTK__" in wx.PlatformInfo:
-            self.Bind(wx.EVT_RIGHT_UP, self.scheduleMenu)
-        else:
-            self.Bind(wx.EVT_RIGHT_DOWN, self.scheduleMenu)
+        self.Bind(wx.EVT_CONTEXT_MENU, self.spawnMenu)
 
     def handleListDrag(self, x, y, data):
         """
@@ -81,15 +78,24 @@ class CargoView(d.Display):
         if data[0] == "fitting":
             self.swapModule(x, y, int(data[1]))
         elif data[0] == "market":
-            self.mainFrame.command.Submit(cmd.GuiAddCargoCommand(self.mainFrame.getActiveFit(), int(data[1])))
+            fitID = self.mainFrame.getActiveFit()
+            if fitID:
+                self.mainFrame.command.Submit(cmd.GuiAddCargoCommand(
+                    fitID=fitID, itemID=int(data[1]), amount=1))
 
     def startDrag(self, event):
         row = event.GetIndex()
 
         if row != -1:
             data = wx.TextDataObject()
-            dataStr = "cargo:" + str(row)
+            try:
+                dataStr = "cargo:{}".format(self.cargo[row].itemID)
+            except IndexError:
+                return
             data.SetText(dataStr)
+
+            self.unselectAll()
+            self.Select(row, True)
 
             dropSource = wx.DropSource(self)
             dropSource.SetData(data)
@@ -98,13 +104,14 @@ class CargoView(d.Display):
 
     def kbEvent(self, event):
         keycode = event.GetKeyCode()
-        if keycode == wx.WXK_DELETE or keycode == wx.WXK_NUMPAD_DELETE:
-            fitID = self.mainFrame.getActiveFit()
-            sFit = Fit.getInstance()
-            row = self.GetFirstSelected()
-            if row != -1:
-                sFit.removeCargo(fitID, self.GetItemData(row))
-                wx.PostEvent(self.mainFrame, GE.FitChanged(fitID=fitID))
+        mstate = wx.GetMouseState()
+        if keycode == wx.WXK_ESCAPE and mstate.GetModifiers() == wx.MOD_NONE:
+            self.unselectAll()
+        elif keycode == 65 and mstate.GetModifiers() == wx.MOD_CONTROL:
+            self.selectAll()
+        elif keycode in (wx.WXK_DELETE, wx.WXK_NUMPAD_DELETE) and mstate.GetModifiers() == wx.MOD_NONE:
+            cargos = self.getSelectedCargos()
+            self.removeCargos(cargos)
         event.Skip()
 
     def swapModule(self, x, y, modIdx):
@@ -112,87 +119,98 @@ class CargoView(d.Display):
         sFit = Fit.getInstance()
         fit = sFit.getFit(self.mainFrame.getActiveFit())
         dstRow, _ = self.HitTest((x, y))
-        mstate = wx.GetMouseState()
 
-        # Gather module information to get position
-        module = fit.modules[modIdx]
+        if dstRow > -1:
+            try:
+                dstCargoItemID = getattr(self.cargo[dstRow], 'itemID', None)
+            except IndexError:
+                dstCargoItemID = None
+        else:
+            dstCargoItemID = None
 
-        if module.item.isAbyssal:
-            dlg = wx.MessageDialog(self,
-               "Moving this Abyssal module to the cargo will convert it to the base module. Do you wish to proceed?",
-               "Confirm", wx.YES_NO | wx.ICON_QUESTION)
-            result = dlg.ShowModal() == wx.ID_YES
-
-            if not result:
-                return
-
-        cargoPos = dstRow if dstRow > -1 else None
-
-        self.mainFrame.command.Submit(cmd.GuiModuleToCargoCommand(
-            self.mainFrame.getActiveFit(),
-            module.modPosition,
-            cargoPos,
-            mstate.cmdDown
-        ))
+        self.mainFrame.command.Submit(cmd.GuiLocalModuleToCargoCommand(
+            fitID=self.mainFrame.getActiveFit(),
+            modPosition=modIdx,
+            cargoItemID=dstCargoItemID,
+            copy=wx.GetMouseState().GetModifiers() == wx.MOD_CONTROL))
 
     def fitChanged(self, event):
+        event.Skip()
+        activeFitID = self.mainFrame.getActiveFit()
+        if activeFitID is not None and activeFitID not in event.fitIDs:
+            return
+
         sFit = Fit.getInstance()
-        fit = sFit.getFit(event.fitID)
+        fit = sFit.getFit(activeFitID)
 
         # self.Parent.Parent.DisablePage(self, not fit or fit.isStructure)
 
         # Clear list and get out if current fitId is None
-        if event.fitID is None and self.lastFitId is not None:
+        if activeFitID is None and self.lastFitId is not None:
             self.DeleteAllItems()
             self.lastFitId = None
-            event.Skip()
             return
 
         self.original = fit.cargo if fit is not None else None
-        self.cargo = stuff = fit.cargo if fit is not None else None
-        if stuff is not None:
-            stuff.sort(key=lambda c: (c.item.group.category.name, c.item.group.name, c.item.name))
+        self.cargo = fit.cargo[:] if fit is not None else None
+        if self.cargo is not None:
+            self.cargo.sort(key=lambda c: (c.item.group.category.name, c.item.group.name, c.item.name))
 
-        if event.fitID != self.lastFitId:
-            self.lastFitId = event.fitID
+        if activeFitID != self.lastFitId:
+            self.lastFitId = activeFitID
 
             item = self.GetNextItem(-1, wx.LIST_NEXT_ALL, wx.LIST_STATE_DONTCARE)
 
             if item != -1:
                 self.EnsureVisible(item)
 
-            self.deselectItems()
+            self.unselectAll()
 
-        self.populate(stuff)
-        self.refresh(stuff)
-        event.Skip()
+        self.populate(self.cargo)
+        self.refresh(self.cargo)
 
-    def removeItem(self, event):
+    def onLeftDoubleClick(self, event):
         row, _ = self.HitTest(event.Position)
         if row != -1:
-            col = self.getColumn(event.Position)
-            if col != self.getColIndex(State):
-                fitID = self.mainFrame.getActiveFit()
-                sFit = Fit.getInstance()
-                cargo = self.cargo[self.GetItemData(row)]
-                sFit.removeCargo(fitID, self.original.index(cargo))
-                wx.PostEvent(self.mainFrame, GE.FitChanged(fitID=fitID))
+            try:
+                cargo = self.cargo[row]
+            except IndexError:
+                return
+            self.removeCargos([cargo])
 
-    def scheduleMenu(self, event):
-        event.Skip()
-        if self.getColumn(event.Position) != self.getColIndex(State):
-            wx.CallAfter(self.spawnMenu)
+    def removeCargos(self, cargos):
+        fitID = self.mainFrame.getActiveFit()
+        itemIDs = []
+        for cargo in cargos:
+            if cargo in self.original:
+                itemIDs.append(cargo.itemID)
+        self.mainFrame.command.Submit(cmd.GuiRemoveCargosCommand(fitID=fitID, itemIDs=itemIDs))
 
-    def spawnMenu(self):
-        sel = self.GetFirstSelected()
-        if sel != -1:
-            sFit = Fit.getInstance()
-            fit = sFit.getFit(self.mainFrame.getActiveFit())
-            cargo = fit.cargo[sel]
+    def spawnMenu(self, event):
+        clickedPos = self.getRowByAbs(event.Position)
+        self.ensureSelection(clickedPos)
 
-            sMkt = Market.getInstance()
-            sourceContext = "cargoItem"
-            itemContext = sMkt.getCategoryByItem(cargo.item).name
-
-            menu = ContextMenu.getMenu((cargo,), (sourceContext, itemContext))
+        selection = self.getSelectedCargos()
+        mainCargo = None
+        if clickedPos != -1:
+            try:
+                cargo = self.cargo[clickedPos]
+            except IndexError:
+                pass
+            else:
+                if cargo in self.original:
+                    mainCargo = cargo
+        itemContext = None if mainCargo is None else Market.getInstance().getCategoryByItem(mainCargo.item).name
+        menu = ContextMenu.getMenu(self, mainCargo, selection, ("cargoItem", itemContext), ("cargoItemMisc", itemContext))
+        if menu:
             self.PopupMenu(menu)
+
+    def getSelectedCargos(self):
+        cargos = []
+        for row in self.getSelectedRows():
+            try:
+                cargo = self.cargo[row]
+            except IndexError:
+                continue
+            cargos.append(cargo)
+        return cargos

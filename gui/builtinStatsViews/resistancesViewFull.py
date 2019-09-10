@@ -19,15 +19,14 @@
 
 # noinspection PyPackageRequirements
 import wx
-from gui.statsView import StatsView
+
+import gui.globalEvents as GE
+import gui.mainFrame
 from gui.bitmap_loader import BitmapLoader
 from gui.pyfa_gauge import PyGauge
-from gui.utils.numberFormatter import formatAmount
-import gui.mainFrame
-import gui.globalEvents as GE
+from gui.statsView import StatsView
 from gui.utils import fonts
-
-EffectiveHpToggled, EFFECTIVE_HP_TOGGLED = wx.lib.newevent.NewEvent()
+from gui.utils.numberFormatter import formatAmount
 
 
 class ResistancesViewFull(StatsView):
@@ -40,7 +39,7 @@ class ResistancesViewFull(StatsView):
         self.showEffective = True
         self.activeFit = None
         self.mainFrame = gui.mainFrame.MainFrame.getInstance()
-        self.mainFrame.Bind(EFFECTIVE_HP_TOGGLED, self.ehpSwitch)
+        self.mainFrame.Bind(GE.EFFECTIVE_HP_TOGGLED, self.ehpSwitch)
 
     def getHeaderText(self, fit):
         return "Resistances"
@@ -55,9 +54,8 @@ class ResistancesViewFull(StatsView):
 
         self.headerPanel = headerPanel
         # Custom header  EHP
-        headerContentSizer = wx.BoxSizer(wx.HORIZONTAL)
-        hsizer = headerPanel.GetSizer()
-        hsizer.Add(headerContentSizer, 0, 0, 0)
+        headerContentSizer = self.headerPanel.Parent.GetHeaderContentSizer()
+
         self.stEff = wx.StaticText(headerPanel, wx.ID_ANY, "( Effective HP: ")
         headerContentSizer.Add(self.stEff)
         headerPanel.GetParent().AddToggleItem(self.stEff)
@@ -161,17 +159,19 @@ class ResistancesViewFull(StatsView):
         self.stEHPs.SetToolTip(wx.ToolTip("Click to toggle between effective HP and raw HP"))
 
     def toggleEHP(self, event):
-        wx.PostEvent(self.mainFrame, EffectiveHpToggled(effective=self.stEHPs.GetLabel() == "HP"))
+        wx.PostEvent(self.mainFrame, GE.EffectiveHpToggled(effective=self.stEHPs.GetLabel() == "HP"))
 
     def ehpSwitch(self, event):
+        event.Skip()
         self.showEffective = event.effective
-        wx.PostEvent(self.mainFrame, GE.FitChanged(fitID=self.mainFrame.getActiveFit()))
+        fitID = self.mainFrame.getActiveFit()
+        wx.PostEvent(self.mainFrame, GE.FitChanged(fitIDs=(fitID,)))
 
     def refreshPanel(self, fit):
         # If we did anything intresting, we'd update our labels to reflect the new fit's stats here
         if fit is None and not self.showEffective:
             self.showEffective = True
-            wx.PostEvent(self.mainFrame, EffectiveHpToggled(effective=True))
+            wx.PostEvent(self.mainFrame, GE.EffectiveHpToggled(effective=True))
             return
 
         self.stEHPs.SetLabel("EHP" if self.showEffective else "HP")

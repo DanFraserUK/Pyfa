@@ -17,14 +17,15 @@
 # along with eos.  If not, see <http://www.gnu.org/licenses/>.
 # ===============================================================================
 
+import math
 from logbook import Logger
-
-from sqlalchemy.orm import validates, reconstructor
+from sqlalchemy.orm import reconstructor, validates
 
 import eos.db
-from eos.effectHandlerHelpers import HandledItem, HandledCharge
-from eos.modifiedAttributeDict import ModifiedAttributeDict, ItemAttrShortcut, ChargeAttrShortcut
-from eos.utils.stats import DmgTypes
+from eos.effectHandlerHelpers import HandledCharge, HandledItem
+from eos.modifiedAttributeDict import ChargeAttrShortcut, ItemAttrShortcut, ModifiedAttributeDict
+from eos.utils.cycles import CycleInfo
+from eos.utils.stats import DmgTypes, RRTypes
 
 
 pyfalog = Logger(__name__)
@@ -67,7 +68,7 @@ class Drone(HandledItem, HandledCharge, ItemAttrShortcut, ChargeAttrShortcut):
         """ Build object. Assumes proper and valid item already set """
         self.__charge = None
         self.__baseVolley = None
-        self.__baseRemoteReps = None
+        self.__baseRRAmount = None
         self.__miningyield = None
         self.__itemModifiedAttributes = ModifiedAttributeDict()
         self.__itemModifiedAttributes.original = self.__item.attributes
@@ -104,7 +105,16 @@ class Drone(HandledItem, HandledCharge, ItemAttrShortcut, ChargeAttrShortcut):
 
     @property
     def cycleTime(self):
-        return max(self.getModifiedItemAttr("duration", 0), 0)
+        if self.hasAmmo:
+            cycleTime = self.getModifiedItemAttr("missileLaunchDuration", 0)
+        else:
+            for attr in ("speed", "duration"):
+                cycleTime = self.getModifiedItemAttr(attr, None)
+                if cycleTime is not None:
+                    break
+        if cycleTime is None:
+            return 0
+        return max(cycleTime, 0)
 
     @property
     def dealsDamage(self):
@@ -121,9 +131,16 @@ class Drone(HandledItem, HandledCharge, ItemAttrShortcut, ChargeAttrShortcut):
     def hasAmmo(self):
         return self.charge is not None
 
-    def getVolley(self, targetResists=None):
+    def isDealingDamage(self):
+        volleyParams = self.getVolleyParameters()
+        for volley in volleyParams.values():
+            if volley.total > 0:
+                return True
+        return False
+
+    def getVolleyParameters(self, targetProfile=None):
         if not self.dealsDamage or self.amountActive <= 0:
-            return DmgTypes(0, 0, 0, 0)
+            return {0: DmgTypes(0, 0, 0, 0)}
         if self.__baseVolley is None:
             dmgGetter = self.getModifiedChargeAttr if self.hasAmmo else self.getModifiedItemAttr
             dmgMult = self.amountActive * (self.getModifiedItemAttr("damageMultiplier", 1))
@@ -133,19 +150,23 @@ class Drone(HandledItem, HandledCharge, ItemAttrShortcut, ChargeAttrShortcut):
                 kinetic=(dmgGetter("kineticDamage", 0)) * dmgMult,
                 explosive=(dmgGetter("explosiveDamage", 0)) * dmgMult)
         volley = DmgTypes(
-            em=self.__baseVolley.em * (1 - getattr(targetResists, "emAmount", 0)),
-            thermal=self.__baseVolley.thermal * (1 - getattr(targetResists, "thermalAmount", 0)),
-            kinetic=self.__baseVolley.kinetic * (1 - getattr(targetResists, "kineticAmount", 0)),
-            explosive=self.__baseVolley.explosive * (1 - getattr(targetResists, "explosiveAmount", 0)))
-        return volley
+            em=self.__baseVolley.em * (1 - getattr(targetProfile, "emAmount", 0)),
+            thermal=self.__baseVolley.thermal * (1 - getattr(targetProfile, "thermalAmount", 0)),
+            kinetic=self.__baseVolley.kinetic * (1 - getattr(targetProfile, "kineticAmount", 0)),
+            explosive=self.__baseVolley.explosive * (1 - getattr(targetProfile, "explosiveAmount", 0)))
+        return {0: volley}
 
-    def getDps(self, targetResists=None):
-        volley = self.getVolley(targetResists=targetResists)
+    def getVolley(self, targetProfile=None):
+        return self.getVolleyParameters(targetProfile=targetProfile)[0]
+
+    def getDps(self, targetProfile=None):
+        volley = self.getVolley(targetProfile=targetProfile)
         if not volley:
             return DmgTypes(0, 0, 0, 0)
-        cycleAttr = "missileLaunchDuration" if self.hasAmmo else "speed"
-        cycleTime = self.getModifiedItemAttr(cycleAttr)
-        dpsFactor = 1 / (cycleTime / 1000)
+        cycleParams = self.getCycleParameters()
+        if cycleParams is None:
+            return DmgTypes(0, 0, 0, 0)
+        dpsFactor = 1 / (cycleParams.averageTime / 1000)
         dps = DmgTypes(
             em=volley.em * dpsFactor,
             thermal=volley.thermal * dpsFactor,
@@ -153,45 +174,65 @@ class Drone(HandledItem, HandledCharge, ItemAttrShortcut, ChargeAttrShortcut):
             explosive=volley.explosive * dpsFactor)
         return dps
 
-    def getRemoteReps(self, ignoreState=False):
-        if self.amountActive <= 0 and not ignoreState:
-            return (None, 0)
-        if self.__baseRemoteReps is None:
-            rrShield = self.getModifiedItemAttr("shieldBonus", 0)
-            rrArmor = self.getModifiedItemAttr("armorDamageAmount", 0)
-            rrHull = self.getModifiedItemAttr("structureDamageAmount", 0)
-            if rrShield:
-                rrType = "Shield"
-                rrAmount = rrShield
-            elif rrArmor:
-                rrType = "Armor"
-                rrAmount = rrArmor
-            elif rrHull:
-                rrType = "Hull"
-                rrAmount = rrHull
-            else:
-                rrType = None
-                rrAmount = 0
-            if rrAmount:
-                droneAmount = self.amount if ignoreState else self.amountActive
-                rrAmount *= droneAmount / (self.cycleTime / 1000)
-            self.__baseRemoteReps = (rrType, rrAmount)
-        return self.__baseRemoteReps
+    def isRemoteRepping(self, ignoreState=False):
+        repParams = self.getRepAmountParameters(ignoreState=ignoreState)
+        for rrData in repParams.values():
+            if rrData:
+                return True
+        return False
 
-    def changeType(self, typeID):
-        self.itemID = typeID
-        self.init()
+    def getRepAmountParameters(self, ignoreState=False):
+        amount = self.amount if ignoreState else self.amountActive
+        if amount <= 0:
+            return {}
+        if self.__baseRRAmount is None:
+            self.__baseRRAmount = {}
+            hullAmount = self.getModifiedItemAttr("structureDamageAmount", 0)
+            armorAmount = self.getModifiedItemAttr("armorDamageAmount", 0)
+            shieldAmount = self.getModifiedItemAttr("shieldBonus", 0)
+            if shieldAmount:
+                self.__baseRRAmount[0] = RRTypes(
+                    shield=shieldAmount * amount,
+                    armor=0, hull=0, capacitor=0)
+            if armorAmount or hullAmount:
+                self.__baseRRAmount[self.cycleTime] = RRTypes(
+                    shield=0, armor=armorAmount * amount,
+                    hull=hullAmount * amount, capacitor=0)
+        return self.__baseRRAmount
+
+    def getRemoteReps(self, ignoreState=False):
+        rrDuringCycle = RRTypes(0, 0, 0, 0)
+        cycleParams = self.getCycleParameters()
+        if cycleParams is None:
+            return rrDuringCycle
+        repAmountParams = self.getRepAmountParameters(ignoreState=ignoreState)
+        avgCycleTime = cycleParams.averageTime
+        if len(repAmountParams) == 0 or avgCycleTime == 0:
+            return rrDuringCycle
+        for rrAmount in repAmountParams.values():
+            rrDuringCycle += rrAmount
+        rrFactor = 1 / (avgCycleTime / 1000)
+        rrDuringCycle *= rrFactor
+        return rrDuringCycle
+
+    def getCycleParameters(self, reloadOverride=None):
+        cycleTime = self.cycleTime
+        if cycleTime == 0:
+            return None
+        return CycleInfo(self.cycleTime, 0, math.inf, False)
 
     @property
     def miningStats(self):
         if self.__miningyield is None:
             if self.mines is True and self.amountActive > 0:
-                attr = "duration"
                 getter = self.getModifiedItemAttr
-
-                cycleTime = self.getModifiedItemAttr(attr)
-                volley = sum([getter(d) for d in self.MINING_ATTRIBUTES]) * self.amountActive
-                self.__miningyield = volley / (cycleTime / 1000.0)
+                cycleParams = self.getCycleParameters()
+                if cycleParams is None:
+                    self.__miningyield = 0
+                else:
+                    cycleTime = cycleParams.averageTime
+                    volley = sum([getter(d) for d in self.MINING_ATTRIBUTES]) * self.amountActive
+                    self.__miningyield = volley / (cycleTime / 1000.0)
             else:
                 self.__miningyield = 0
 
@@ -240,7 +281,7 @@ class Drone(HandledItem, HandledCharge, ItemAttrShortcut, ChargeAttrShortcut):
 
     def clear(self):
         self.__baseVolley = None
-        self.__baseRemoteReps = None
+        self.__baseRRAmount = None
         self.__miningyield = None
         self.itemModifiedAttributes.clear()
         self.chargeModifiedAttributes.clear()
@@ -278,11 +319,17 @@ class Drone(HandledItem, HandledCharge, ItemAttrShortcut, ChargeAttrShortcut):
                                  projected is False and effect.isType("passive")):
                 # See GH issue #765
                 if effect.getattr('grouped'):
-                    effect.handler(fit, self, context)
+                    try:
+                        effect.handler(fit, self, context, effect=effect)
+                    except:
+                        effect.handler(fit, self, context)
                 else:
                     i = 0
                     while i != self.amountActive:
-                        effect.handler(fit, self, context)
+                        try:
+                            effect.handler(fit, self, context, effect=effect)
+                        except:
+                            effect.handler(fit, self, context)
                         i += 1
 
         if self.charge:
@@ -295,6 +342,13 @@ class Drone(HandledItem, HandledCharge, ItemAttrShortcut, ChargeAttrShortcut):
         copy.amount = self.amount
         copy.amountActive = self.amountActive
         return copy
+
+    def rebase(self, item):
+        amount = self.amount
+        amountActive = self.amountActive
+        Drone.__init__(self, item)
+        self.amount = amount
+        self.amountActive = amountActive
 
     def fits(self, fit):
         fitDroneGroupLimits = set()

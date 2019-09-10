@@ -21,7 +21,7 @@
 import wx
 
 
-class PreferenceView(object):
+class PreferenceView:
     views = []
 
     @classmethod
@@ -46,6 +46,7 @@ from gui.builtinPreferenceViews import (  # noqa: E402, F401
     pyfaEsiPreferences,
     pyfaContextMenuPreferences,
     pyfaStatViewPreferences,
+    pyfaMarketPreferences,
     pyfaUpdatePreferences,
     pyfaEnginePreferences,
     pyfaDatabasePreferences,

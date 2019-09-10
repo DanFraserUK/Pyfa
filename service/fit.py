@@ -20,24 +20,22 @@
 import copy
 import datetime
 from time import time
+from weakref import WeakSet
 
 import wx
 from logbook import Logger
 
 import eos.db
+from eos.const import FittingModuleState, ImplantLocation
 from eos.saveddata.character import Character as saveddata_Character
 from eos.saveddata.citadel import Citadel as es_Citadel
 from eos.saveddata.damagePattern import DamagePattern as es_DamagePattern
-from eos.saveddata.drone import Drone as es_Drone
-from eos.saveddata.fighter import Fighter as es_Fighter
-from eos.saveddata.fit import Fit as FitType, ImplantLocation
-from eos.saveddata.module import Module as es_Module, State
+from eos.saveddata.fit import Fit as FitType
 from eos.saveddata.ship import Ship as es_Ship
 from service.character import Character
 from service.damagePattern import DamagePattern
-from service.fitDeprecated import FitDeprecated
 from service.settings import SettingsProvider
-from utils.deprecated import deprecated
+
 
 pyfalog = Logger(__name__)
 
@@ -49,15 +47,14 @@ class DeferRecalc:
 
     def __enter__(self):
         self._recalc = self.sFit.recalc
-        self.sFit.recalc = lambda x: print('Deferred Recalc')
+        self.sFit.recalc = lambda x: pyfalog.debug('Deferred Recalc')
 
     def __exit__(self, *args):
         self.sFit.recalc = self._recalc
         self.sFit.recalc(self.fitID)
 
 
-# inherits from FitDeprecated so that I can move all the dead shit, but not affect functionality
-class Fit(FitDeprecated):
+class Fit:
     instance = None
     processors = {}
 
@@ -71,10 +68,10 @@ class Fit(FitDeprecated):
     def __init__(self):
         pyfalog.debug("Initialize Fit class")
         self.pattern = DamagePattern.getInstance().getDamagePattern("Uniform")
-        self.targetResists = None
+        self.targetProfile = None
         self.character = saveddata_Character.getAll5()
         self.booster = False
-        self.dirtyFitIDs = set()
+        self._loadedFits = WeakSet()
 
         serviceFittingDefaultOptions = {
             "useGlobalCharacter": False,
@@ -91,9 +88,10 @@ class Fit(FitDeprecated):
             "enableGaugeAnimation": True,
             "openFitInNew": False,
             "priceSystem": "Jita",
-            "priceSource": "eve-marketdata.com",
+            "priceSource": "evemarketer",
             "showShipBrowserTooltip": True,
-            "marketSearchDelay": 250
+            "marketSearchDelay": 250,
+            "ammoChangeAll": False,
         }
 
         self.serviceFittingOptions = SettingsProvider.getInstance().getSettings(
@@ -103,6 +101,21 @@ class Fit(FitDeprecated):
     def getAllFits():
         pyfalog.debug("Fetching all fits")
         fits = eos.db.getFitList()
+        return fits
+
+    @staticmethod
+    def getAllFitsLite():
+        fits = eos.db.getFitListLite()
+        shipMap = {f.shipID: None for f in fits}
+        for shipID in shipMap:
+            ship = eos.db.getItem(shipID)
+            if ship is not None:
+                shipMap[shipID] = (ship.name, ship.getShortName())
+        for fit in fits:
+            try:
+                fit.shipName, fit.shipNameShort = shipMap[fit.shipID]
+            except KeyError:
+                pass
         return fits
 
     @staticmethod
@@ -138,6 +151,7 @@ class Fit(FitDeprecated):
     @staticmethod
     def getFitsWithModules(typeIDs):
         """ Lists fits flagged as booster """
+        pyfalog.debug('Getting fits with modules')
         fits = eos.db.getFitsWithModules(typeIDs)
         return fits
 
@@ -145,6 +159,11 @@ class Fit(FitDeprecated):
     def countAllFits():
         pyfalog.debug("Getting count of all fits.")
         return eos.db.countAllFits()
+
+    @staticmethod
+    def countAllFitsGroupedByShip():
+        count = eos.db.countFitGroupedByShip()
+        return count
 
     @staticmethod
     def countFitsWithShip(stuff):
@@ -166,21 +185,15 @@ class Fit(FitDeprecated):
         fit = FitType(ship)
         fit.name = name if name is not None else "New %s" % fit.ship.item.name
         fit.damagePattern = self.pattern
-        fit.targetResists = self.targetResists
+        fit.targetProfile = self.targetProfile
         fit.character = self.character
         fit.booster = self.booster
         useCharImplants = self.serviceFittingOptions["useCharacterImplantsByDefault"]
         fit.implantLocation = ImplantLocation.CHARACTER if useCharImplants else ImplantLocation.FIT
         eos.db.save(fit)
         self.recalc(fit)
+        self.fill(fit)
         return fit.ID
-
-    @staticmethod
-    def toggleBoostFit(fitID):
-        pyfalog.debug("Toggling as booster for fit ID: {0}", fitID)
-        fit = eos.db.getFit(fitID)
-        fit.booster = not fit.booster
-        eos.db.commit()
 
     @staticmethod
     def deleteFit(fitID):
@@ -217,7 +230,7 @@ class Fit(FitDeprecated):
     @classmethod
     def getCommandProcessor(cls, fitID):
         if fitID not in cls.processors:
-            cls.processors[fitID] = wx.CommandProcessor()
+            cls.processors[fitID] = wx.CommandProcessor(maxCommands=100)
         return cls.processors[fitID]
 
     @staticmethod
@@ -245,15 +258,29 @@ class Fit(FitDeprecated):
             fit.notes = notes
             eos.db.commit()
 
-    def toggleFactorReload(self, fitID):
-        pyfalog.debug("Toggling factor reload for fit ID: {0}", fitID)
-        if fitID is None:
-            return None
+    def toggleFactorReload(self, value=None):
+        self.serviceFittingOptions['useGlobalForceReload'] = value if value is not None else not self.serviceFittingOptions['useGlobalForceReload']
+        fitIDs = set()
+        for fit in set(self._loadedFits):
+            if fit is None:
+                continue
+            if fit.calculated:
+                fit.factorReload = self.serviceFittingOptions['useGlobalForceReload']
+                fit.clearFactorReloadDependentData()
+                fitIDs.add(fit.ID)
+        return fitIDs
 
-        fit = eos.db.getFit(fitID)
-        fit.factorReload = not fit.factorReload
-        eos.db.commit()
-        self.recalc(fit)
+    def processTargetProfileChange(self):
+        fitIDs = set()
+        for fit in set(self._loadedFits):
+            if fit is None:
+                continue
+            if not fit.targetProfile:
+                continue
+            if fit.calculated:
+                self.recalc(fit)
+                fitIDs.add(fit.ID)
+        return fitIDs
 
     def switchFit(self, fitID):
         pyfalog.debug("Switching fit to fit ID: {0}", fitID)
@@ -276,6 +303,7 @@ class Fit(FitDeprecated):
 
         if not fit.calculated:
             self.recalc(fit)
+            self.fill(fit)
 
     def getFit(self, fitID, projected=False, basic=False):
         """
@@ -292,6 +320,8 @@ class Fit(FitDeprecated):
         if fit is None:
             return None
 
+        self._loadedFits.add(fit)
+
         if basic:
             return fit
 
@@ -302,7 +332,7 @@ class Fit(FitDeprecated):
                 for fitP in fit.projectedFits:
                     self.getFit(fitP.ID, projected=True)
                 self.recalc(fit)
-                fit.fill()
+                self.fill(fit)
 
                 # this will loop through modules and set their restriction flag (set in m.fit())
                 if fit.ignoreRestrictions:
@@ -334,123 +364,12 @@ class Fit(FitDeprecated):
                 fit.notes))
         return fits
 
-    def toggleProjected(self, fitID, thing, click):
-        pyfalog.debug("Toggling projected on fit ({0}) for: {1}", fitID, thing)
-        fit = eos.db.getFit(fitID)
-        if isinstance(thing, es_Drone):
-            if thing.amountActive == 0 and thing.canBeApplied(fit):
-                thing.amountActive = thing.amount
-            else:
-                thing.amountActive = 0
-        elif isinstance(thing, es_Fighter):
-            thing.active = not thing.active
-        elif isinstance(thing, es_Module):
-            thing.state = es_Module.getProposedState(thing, click)
-            if not thing.canHaveState(thing.state, fit):
-                thing.state = State.OFFLINE
-        elif isinstance(thing, FitType):
-            projectionInfo = thing.getProjectionInfo(fitID)
-            if projectionInfo:
-                projectionInfo.active = not projectionInfo.active
-
-        eos.db.commit()
-        self.recalc(fit)
-
-    def changeMutatedValue(self, mutator, value):
+    def changeMutatedValuePrelim(self, mutator, value):
         pyfalog.debug("Changing mutated value for {} / {}: {} => {}".format(mutator.module, mutator.module.mutaplasmid, mutator.value, value))
-        mutator.value = value
-
-        eos.db.commit()
+        if mutator.value != value:
+            mutator.value = value
+            eos.db.flush()
         return mutator.value
-
-    def convertMutaplasmid(self, fitID, position, mutaplasmid):
-        # this is mostly the same thing as the self.changeModule method, however it initializes an abyssal module with
-        # the old module as it's base, and then replaces it
-        fit = eos.db.getFit(fitID)
-        base = fit.modules[position]
-        fit.modules.toDummy(position)
-
-        try:
-            m = es_Module(mutaplasmid.resultingItem, base.item, mutaplasmid)
-        except ValueError:
-            pyfalog.warning("Invalid item: {0} AHHHH")
-            return False
-
-        if m.fits(fit):
-            m.owner = fit
-            fit.modules.toModule(position, m)
-            if m.isValidState(State.ACTIVE):
-                m.state = State.ACTIVE
-
-            # As some items may affect state-limiting attributes of the ship, calculate new attributes first
-            self.recalc(fit)
-            # Then, check states of all modules and change where needed. This will recalc if needed
-            self.checkStates(fit, m)
-
-            fit.fill()
-            eos.db.commit()
-
-            return True
-        else:
-            return None
-
-    @deprecated
-    def addDrone(self, fitID, itemID, numDronesToAdd=1, recalc=True):
-        pyfalog.debug("Adding {0} drones ({1}) to fit ID: {2}", numDronesToAdd, itemID, fitID)
-        if fitID is None:
-            return False
-
-        fit = eos.db.getFit(fitID)
-        item = eos.db.getItem(itemID, eager=("attributes", "group.category"))
-        if item.category.name == "Drone":
-            drone = None
-            for d in fit.drones.find(item):
-                if d is not None and d.amountActive == 0 and d.amount < max(5, fit.extraAttributes["maxActiveDrones"]):
-                    drone = d
-                    break
-
-            if drone is None:
-                drone = es_Drone(item)
-                if drone.fits(fit) is True:
-                    fit.drones.append(drone)
-                else:
-                    return False
-            drone.amount += numDronesToAdd
-            eos.db.commit()
-            if recalc:
-                self.recalc(fit)
-            return True
-        else:
-            return False
-
-    def toggleRestrictionIgnore(self, fitID):
-        pyfalog.debug("Toggling restriction ignore for fit ID: {0}", fitID)
-        fit = eos.db.getFit(fitID)
-        fit.ignoreRestrictions = not fit.ignoreRestrictions
-
-        # remove invalid modules when switching back to enabled fitting restrictions
-        if not fit.ignoreRestrictions:
-            for m in fit.modules:
-                if not m.isEmpty and not m.fits(fit, False):
-                    self.removeModule(fit.ID, m.modPosition)
-
-        eos.db.commit()
-        self.recalc(fit)
-        return True
-
-    def toggleFighterAbility(self, fitID, ability):
-        pyfalog.debug("Toggling fighter ability for fit ID: {0}", fitID)
-        fit = eos.db.getFit(fitID)
-        ability.active = not ability.active
-        eos.db.commit()
-        self.recalc(fit)
-
-    def toggleBoosterSideEffect(self, fitID, sideEffect):
-        pyfalog.debug("Toggling booster side effect for fit ID: {0}", fitID)
-        fit = eos.db.getFit(fitID)
-        sideEffect.active = not sideEffect.active
-        eos.db.commit()
-        self.recalc(fit)
 
     def changeChar(self, fitID, charID):
         pyfalog.debug("Changing character ({0}) for fit ID: {1}", charID, fitID)
@@ -463,28 +382,24 @@ class Fit(FitDeprecated):
         fit = eos.db.getFit(fitID)
         fit.character = self.character = eos.db.getCharacter(charID)
         self.recalc(fit)
+        self.fill(fit)
 
     @staticmethod
-    def isAmmo(itemID):
-        # todo: get rid of this form the service, use directly from item
-        return eos.db.getItem(itemID).isCharge
-
-    @staticmethod
-    def getTargetResists(fitID):
-        pyfalog.debug("Get target resists for fit ID: {0}", fitID)
+    def getTargetProfile(fitID):
+        pyfalog.debug("Get target profile for fit ID: {0}", fitID)
         if fitID is None:
             return
 
         fit = eos.db.getFit(fitID)
-        return fit.targetResists
+        return fit.targetProfile
 
-    def setTargetResists(self, fitID, pattern):
+    def setTargetProfile(self, fitID, pattern):
         pyfalog.debug("Set target resist for fit ID: {0}", fitID)
         if fitID is None:
             return
 
         fit = eos.db.getFit(fitID)
-        fit.targetResists = pattern
+        fit.targetProfile = pattern
         eos.db.commit()
 
         self.recalc(fit)
@@ -529,29 +444,56 @@ class Fit(FitDeprecated):
 
     def checkStates(self, fit, base):
         pyfalog.debug("Check states for fit ID: {0}", fit)
-        changed = False
-        for mod in fit.modules:
-            if mod != base:
+        changedMods = {}
+        changedProjMods = {}
+        changedProjDrones = {}
+        for pos, mod in enumerate(fit.modules):
+            if mod is not base:
                 # fix for #529, where a module may be in incorrect state after CCP changes mechanics of module
-                if not mod.canHaveState(mod.state) or not mod.isValidState(mod.state):
-                    mod.state = State.ONLINE
-                    changed = True
+                canHaveState = mod.canHaveState(mod.state)
+                if canHaveState is not True:
+                    changedMods[pos] = mod.state
+                    mod.state = canHaveState
+                elif not mod.isValidState(mod.state):
+                    changedMods[pos] = mod.state
+                    mod.state = FittingModuleState.ONLINE
 
-        for mod in fit.projectedModules:
+        for pos, mod in enumerate(fit.projectedModules):
             # fix for #529, where a module may be in incorrect state after CCP changes mechanics of module
-            if not mod.canHaveState(mod.state, fit) or not mod.isValidState(mod.state):
-                mod.state = State.OFFLINE
-                changed = True
+            canHaveState = mod.canHaveState(mod.state, fit)
+            if canHaveState is not True:
+                changedProjMods[pos] = mod.state
+                mod.state = canHaveState
+            elif not mod.isValidState(mod.state):
+                changedProjMods[pos] = mod.state
+                mod.state = FittingModuleState.OFFLINE
 
-        for drone in fit.projectedDrones:
+        for pos, drone in enumerate(fit.projectedDrones):
             if drone.amountActive > 0 and not drone.canBeApplied(fit):
+                changedProjDrones[pos] = drone.amountActive
                 drone.amountActive = 0
-                changed = True
 
-        return changed
-        # If any state was changed, recalculate attributes again
-        # if changed:
-        #     self.recalc(fit)
+        return changedMods, changedProjMods, changedProjDrones
+
+    @classmethod
+    def fitObjectIter(cls, fit, forceFitImplants=False):
+        yield fit.ship
+
+        for mod in fit.modules:
+            if not mod.isEmpty:
+                yield mod
+        implants = fit.implants if forceFitImplants else fit.appliedImplants
+        for container in (fit.drones, fit.fighters, implants, fit.boosters, fit.cargo):
+            for obj in container:
+                yield obj
+
+    @classmethod
+    def fitItemIter(cls, fit, forceFitImplants=False):
+        for fitobj in cls.fitObjectIter(fit, forceFitImplants):
+            yield fitobj.item
+            charge = getattr(fitobj, 'charge', None)
+            if charge:
+                yield charge
 
     def refreshFit(self, fitID):
         pyfalog.debug("Refresh fit for fit ID: {0}", fitID)
@@ -561,6 +503,7 @@ class Fit(FitDeprecated):
         fit = eos.db.getFit(fitID)
         eos.db.commit()
         self.recalc(fit)
+        self.fill(fit)
 
     def recalc(self, fit):
         if isinstance(fit, int):
@@ -570,7 +513,10 @@ class Fit(FitDeprecated):
 
         fit.factorReload = self.serviceFittingOptions["useGlobalForceReload"]
         fit.clear()
-
         fit.calculateModifiedAttributes()
-        fit.fill()
         pyfalog.info("=" * 10 + "recalc time: " + str(time() - start_time) + "=" * 10)
+
+    def fill(self, fit):
+        if isinstance(fit, int):
+            fit = self.getFit(fit)
+        return fit.fill()

@@ -17,33 +17,38 @@
 # along with pyfa.  If not, see <http://www.gnu.org/licenses/>.
 # =============================================================================
 
+import math
+
 # noinspection PyPackageRequirements
 import wx
 from logbook import Logger
 
 import gui.builtinAdditionPanes.droneView
 import gui.display as d
+import gui.fitCommands as cmd
 import gui.globalEvents as GE
-from eos.saveddata.drone import Drone as es_Drone
-from eos.saveddata.fighter import Fighter as es_Fighter
-from eos.saveddata.module import Module as es_Module
+from eos.saveddata.drone import Drone as EosDrone
+from eos.saveddata.fighter import Fighter as EosFighter
+from eos.saveddata.fit import Fit as EosFit
+from eos.saveddata.module import Module as EosModule
 from gui.builtinViewColumns.state import State
 from gui.contextMenu import ContextMenu
+from gui.fitCommands.helpers import getSimilarFighters, getSimilarModPositions
 from gui.utils.staticHelpers import DragDropHelper
 from service.fit import Fit
 from service.market import Market
-import gui.fitCommands as cmd
+
 
 pyfalog = Logger(__name__)
 
 
-class DummyItem(object):
+class DummyItem:
     def __init__(self, txt):
         self.name = txt
         self.iconID = None
 
 
-class DummyEntry(object):
+class DummyEntry:
     def __init__(self, txt):
         self.item = DummyItem(txt)
 
@@ -65,32 +70,35 @@ class ProjectedViewDrop(wx.DropTarget):
 
 
 class ProjectedView(d.Display):
-    DEFAULT_COLS = ["State",
-                    "Ammo Icon",
-                    "Base Icon",
-                    "Base Name",
-                    "Ammo"]
+    DEFAULT_COLS = ['State',
+                    'Ammo Icon',
+                    'Base Icon',
+                    'Base Name',
+                    'Ammo']
 
     def __init__(self, parent):
-        d.Display.__init__(self, parent, style=wx.LC_SINGLE_SEL | wx.BORDER_NONE)
+        d.Display.__init__(self, parent, style=wx.BORDER_NONE)
 
         self.lastFitId = None
 
         self.mainFrame.Bind(GE.FIT_CHANGED, self.fitChanged)
+        self.mainFrame.Bind(GE.FIT_REMOVED, self.OnFitRemoved)
         self.Bind(wx.EVT_LEFT_DOWN, self.click)
         self.Bind(wx.EVT_RIGHT_DOWN, self.click)
-        self.Bind(wx.EVT_LEFT_DCLICK, self.remove)
+        self.Bind(wx.EVT_LEFT_DCLICK, self.onLeftDoubleClick)
         self.Bind(wx.EVT_KEY_UP, self.kbEvent)
 
         self.droneView = gui.builtinAdditionPanes.droneView.DroneView
 
-        if "__WXGTK__" in wx.PlatformInfo:
-            self.Bind(wx.EVT_RIGHT_UP, self.scheduleMenu)
-        else:
-            self.Bind(wx.EVT_RIGHT_DOWN, self.scheduleMenu)
+        self.Bind(wx.EVT_CONTEXT_MENU, self.spawnMenu)
 
-        self.Bind(wx.EVT_LIST_BEGIN_DRAG, self.startDrag)
         self.SetDropTarget(ProjectedViewDrop(self.handleListDrag))
+
+    def OnFitRemoved(self, event):
+        event.Skip()
+        fitID = self.mainFrame.getActiveFit()
+        fit = Fit.getInstance().getFit(fitID)
+        self.refreshContents(fit)
 
     def handleListDrag(self, x, y, data):
         """
@@ -100,74 +108,48 @@ class ProjectedView(d.Display):
             data[0] is hard-coded str of originating source
             data[1] is typeID or index of data we want to manipulate
         """
-        sFit = Fit.getInstance()
         fitID = self.mainFrame.getActiveFit()
-        fit = sFit.getFit(self.mainFrame.getActiveFit())
-
-        if data[0] == "projected":
-            # if source is coming from projected, we are trying to combine drones.
-            pass
-            # removing merge functionality - if people complain about it, can add it back as a command
-            # self.mergeDrones(x, y, int(data[1]))
-        elif data[0] == "fitting":
+        fit = Fit.getInstance().getFit(fitID)
+        if data[0] == 'fitting':
             dstRow, _ = self.HitTest((x, y))
             # Gather module information to get position
-            module = fit.modules[int(data[1])]
-            self.mainFrame.command.Submit(cmd.GuiAddProjectedCommand(fitID, module.itemID, 'item'))
-            # sFit.project(fit.ID, module)
-            # wx.PostEvent(self.mainFrame, GE.FitChanged(fitID=fit.ID))
-        elif data[0] == "market":
-            # sFit = Fit.getInstance()
-            self.mainFrame.command.Submit(cmd.GuiAddProjectedCommand(fitID, int(data[1]), 'item'))
-            # sFit.project(fit.ID, int(data[1]))
-            # wx.PostEvent(self.mainFrame, GE.FitChanged(fitID=fit.ID))
+            self.mainFrame.command.Submit(cmd.GuiAddProjectedModuleCommand(
+                fitID=fitID, itemID=fit.modules[int(data[1])].itemID))
+        elif data[0] == 'market':
+            itemID = int(data[1])
+            category = Market.getInstance().getItem(itemID, eager=('group.category')).category.name
+            if category == 'Module':
+                self.mainFrame.command.Submit(cmd.GuiAddProjectedModuleCommand(fitID=fitID, itemID=itemID))
+            elif category == 'Drone':
+                self.mainFrame.command.Submit(cmd.GuiAddProjectedDroneCommand(fitID=fitID, itemID=itemID))
+            elif category == 'Fighter':
+                self.mainFrame.command.Submit(cmd.GuiAddProjectedFighterCommand(fitID=fitID, itemID=itemID))
 
     def kbEvent(self, event):
         keycode = event.GetKeyCode()
-        if keycode == wx.WXK_DELETE or keycode == wx.WXK_NUMPAD_DELETE:
-            fitID = self.mainFrame.getActiveFit()
-            sFit = Fit.getInstance()
-            row = self.GetFirstSelected()
-            if row != -1:
-                sFit.removeProjected(fitID, self.get(row))
-                wx.PostEvent(self.mainFrame, GE.FitChanged(fitID=fitID))
+        mstate = wx.GetMouseState()
+        if keycode == wx.WXK_ESCAPE and mstate.GetModifiers() == wx.MOD_NONE:
+            self.unselectAll()
+        elif keycode == 65 and mstate.GetModifiers() == wx.MOD_CONTROL:
+            self.selectAll()
+        elif keycode in (wx.WXK_DELETE, wx.WXK_NUMPAD_DELETE) and mstate.GetModifiers() == wx.MOD_NONE:
+            self.mainFrame.command.Submit(cmd.GuiRemoveProjectedItemsCommand(
+                fitID=self.mainFrame.getActiveFit(),
+                items=self.getSelectedProjectors(),
+                amount=math.inf))
+        event.Skip()
 
     def handleDrag(self, type, fitID):
         # Those are drags coming from pyfa sources, NOT builtin wx drags
-        if type == "fit":
+        if type == 'fit':
             activeFit = self.mainFrame.getActiveFit()
             if activeFit:
-                self.mainFrame.command.Submit(cmd.GuiAddProjectedCommand(activeFit, fitID, 'fit'))
-
-    def startDrag(self, event):
-        row = event.GetIndex()
-        if row != -1 and isinstance(self.get(row), es_Drone):
-            data = wx.TextDataObject()
-            dataStr = "projected:" + str(self.GetItemData(row))
-            data.SetText(dataStr)
-
-            dropSource = wx.DropSource(self)
-            dropSource.SetData(data)
-            DragDropHelper.data = dataStr
-            dropSource.DoDragDrop()
-
-    def mergeDrones(self, x, y, itemID):
-        srcRow = self.FindItemData(-1, itemID)
-        dstRow, _ = self.HitTest((x, y))
-        if srcRow != -1 and dstRow != -1:
-            self._merge(srcRow, dstRow)
-
-    def _merge(self, src, dst):
-        dstDrone = self.get(dst)
-        if isinstance(dstDrone, es_Drone):
-            sFit = Fit.getInstance()
-            fitID = self.mainFrame.getActiveFit()
-            if sFit.mergeDrones(fitID, self.get(src), dstDrone, True):
-                wx.PostEvent(self.mainFrame, GE.FitChanged(fitID=fitID))
+                self.mainFrame.command.Submit(cmd.GuiAddProjectedFitsCommand(
+                    fitID=activeFit, projectedFitIDs=[fitID], amount=1))
 
     @staticmethod
     def moduleSort(module):
-        return module.item.name
+        return not module.isExclusiveSystemEffect, module.item.name
 
     @staticmethod
     def fighterSort(fighter):
@@ -186,142 +168,231 @@ class ProjectedView(d.Display):
         return fit.name
 
     def fitChanged(self, event):
+        event.Skip()
+        activeFitID = self.mainFrame.getActiveFit()
+        if activeFitID is not None and activeFitID not in event.fitIDs:
+            return
+
         sFit = Fit.getInstance()
-        fit = sFit.getFit(event.fitID)
-        # pyfalog.debug("ProjectedView::fitChanged: {}", repr(fit))
+        fit = sFit.getFit(activeFitID)
+        # pyfalog.debug('ProjectedView::fitChanged: {}', repr(fit))
 
         self.Parent.Parent.DisablePage(self, not fit or fit.isStructure)
 
         # Clear list and get out if current fitId is None
-        if event.fitID is None and self.lastFitId is not None:
+        if activeFitID is None and self.lastFitId is not None:
             self.DeleteAllItems()
             self.lastFitId = None
-            event.Skip()
             return
 
-        stuff = []
-        if fit is not None:
-            # pyfalog.debug("    Collecting list of stuff to display in ProjectedView")
-            self.modules = fit.projectedModules[:]
-            self.drones = fit.projectedDrones[:]
-            self.fighters = fit.projectedFighters[:]
-            self.fits = fit.projectedFits[:]
 
-            self.modules.sort(key=self.moduleSort)
-            self.drones.sort(key=self.droneSort)
-            self.fighters.sort(key=self.fighterSort)
-            self.fits.sort(key=self.fitSort)
 
-            stuff.extend(self.modules)
-            stuff.extend(self.drones)
-            stuff.extend(self.fighters)
-            stuff.extend(self.fits)
-
-        if event.fitID != self.lastFitId:
-            self.lastFitId = event.fitID
+        if activeFitID != self.lastFitId:
+            self.lastFitId = activeFitID
 
             item = self.GetNextItem(-1, wx.LIST_NEXT_ALL, wx.LIST_STATE_DONTCARE)
 
             if item != -1:
                 self.EnsureVisible(item)
 
-            self.deselectItems()
+            self.unselectAll()
 
+        self.refreshContents(fit)
+
+    def refreshContents(self, fit):
+        stuff = []
+        if fit is not None:
+            self.originalFits = fit.projectedFits
+            self.fits = fit.projectedFits[:]
+            self.originalModules = fit.projectedModules
+            self.modules = fit.projectedModules[:]
+            self.originalDrones = fit.projectedDrones
+            self.drones = fit.projectedDrones[:]
+            self.originalFighters = fit.projectedFighters
+            self.fighters = fit.projectedFighters[:]
+
+            self.fits.sort(key=self.fitSort)
+            self.modules.sort(key=self.moduleSort)
+            self.drones.sort(key=self.droneSort)
+            self.fighters.sort(key=self.fighterSort)
+
+            stuff.extend(self.fits)
+            stuff.extend(self.modules)
+            stuff.extend(self.drones)
+            stuff.extend(self.fighters)
         if not stuff:
-            stuff = [DummyEntry("Drag an item or fit, or use right-click menu for wormhole effects")]
-
+            stuff = [DummyEntry('Drag an item or fit, or use right-click menu for wormhole effects')]
         self.update(stuff)
-
-        event.Skip()
 
     def get(self, row):
         if row == -1:
             return None
 
+        numFits = len(self.fits)
         numMods = len(self.modules)
         numDrones = len(self.drones)
         numFighters = len(self.fighters)
-        numFits = len(self.fits)
 
-        if (numMods + numDrones + numFighters + numFits) == 0:
+        if (numFits + numMods + numDrones + numFighters) == 0:
             return None
 
-        if row < numMods:
-            stuff = self.modules[row]
-        elif row - numMods < numDrones:
-            stuff = self.drones[row - numMods]
-        elif row - numMods - numDrones < numFighters:
-            stuff = self.fighters[row - numMods - numDrones]
+        if row < numFits:
+            fit = self.fits[row]
+            if fit in self.originalFits:
+                return fit
+        elif row - numFits < numMods:
+            mod = self.modules[row - numFits]
+            if mod in self.originalModules:
+                return mod
+        elif row - numFits - numMods < numDrones:
+            drone = self.drones[row - numFits - numMods]
+            if drone in self.originalDrones:
+                return drone
         else:
-            stuff = self.fits[row - numMods - numDrones - numFighters]
-
-        return stuff
+            fighter = self.fighters[row - numFits - numMods - numDrones]
+            if fighter in self.originalFighters:
+                return fighter
+        return None
 
     def click(self, event):
-        event.Skip()
-        row, _ = self.HitTest(event.Position)
-        if row != -1:
-            item = self.get(row)
+        mainRow, _ = self.HitTest(event.Position)
+        if mainRow != -1:
             col = self.getColumn(event.Position)
             if col == self.getColIndex(State):
+                mainItem = self.get(mainRow)
+                if mainItem is None:
+                    return
+                selection = self.getSelectedProjectors()
+                if mainItem not in selection:
+                    selection = [mainItem]
+                modPressed = wx.GetMouseState().GetModifiers() == wx.MOD_ALT
                 fitID = self.mainFrame.getActiveFit()
-                sFit = Fit.getInstance()
-                sFit.toggleProjected(fitID, item, "right" if event.Button == 3 else "left")
-                wx.PostEvent(self.mainFrame, GE.FitChanged(fitID=fitID))
-
-    def scheduleMenu(self, event):
+                if isinstance(mainItem, EosModule) and modPressed:
+                    fit = Fit.getInstance().getFit(fitID)
+                    positions = getSimilarModPositions(fit.projectedModules, mainItem)
+                    selection = [fit.projectedModules[p] for p in positions]
+                elif isinstance(mainItem, EosFighter) and modPressed:
+                    fit = Fit.getInstance().getFit(fitID)
+                    selection = getSimilarFighters(fit.projectedFighters, mainItem)
+                self.mainFrame.command.Submit(cmd.GuiChangeProjectedItemStatesCommand(
+                    fitID=fitID,
+                    mainItem=mainItem,
+                    items=selection,
+                    click='right' if event.GetButton() == 3 else 'left'))
+                return
         event.Skip()
-        if self.getColumn(event.Position) != self.getColIndex(State):
-            wx.CallAfter(self.spawnMenu)
 
-    def spawnMenu(self):
+    def spawnMenu(self, event):
+        clickedPos = self.getRowByAbs(event.Position)
+        self.ensureSelection(clickedPos)
+
         fitID = self.mainFrame.getActiveFit()
         if fitID is None:
             return
 
-        sel = self.GetFirstSelected()
-        context = ()
-        item = self.get(sel)
+        if self.getColumn(self.screenToClientFixed(event.Position)) == self.getColIndex(State):
+            return
 
-        if item is not None:
+        mainItem = self.get(clickedPos)
+
+        contexts = []
+        if mainItem is not None:
             sMkt = Market.getInstance()
 
-            if isinstance(item, es_Drone):
-                srcContext = "projectedDrone"
-                itemContext = sMkt.getCategoryByItem(item.item).name
-                context = ((srcContext, itemContext),)
-            elif isinstance(item, es_Fighter):
-                srcContext = "projectedFighter"
-                itemContext = sMkt.getCategoryByItem(item.item).name
-                context = ((srcContext, itemContext),)
-            elif isinstance(item, es_Module):
-                modSrcContext = "projectedModule"
-                modItemContext = sMkt.getCategoryByItem(item.item).name
+            if isinstance(mainItem, EosModule):
+                modSrcContext = 'projectedModule'
+                modItemContext = 'Projected Item'
                 modFullContext = (modSrcContext, modItemContext)
-                if item.charge is not None:
-                    chgSrcContext = "projectedCharge"
-                    chgItemContext = sMkt.getCategoryByItem(item.charge).name
-                    chgFullContext = (chgSrcContext, chgItemContext)
-                    context = (modFullContext, chgFullContext)
-                else:
-                    context = (modFullContext,)
+                contexts.append(modFullContext)
+                if mainItem.charge is not None:
+                    chargeSrcContext = 'projectedCharge'
+                    chargeItemContext = sMkt.getCategoryByItem(mainItem.charge).name
+                    chargeFullContext = (chargeSrcContext, chargeItemContext)
+                    contexts.append(chargeFullContext)
+            elif isinstance(mainItem, EosDrone):
+                srcContext = 'projectedDrone'
+                itemContext = 'Projected Item'
+                droneFullContext = (srcContext, itemContext)
+                contexts.append(droneFullContext)
+            elif isinstance(mainItem, EosFighter):
+                srcContext = 'projectedFighter'
+                itemContext = 'Projected Item'
+                fighterFullContext = (srcContext, itemContext)
+                contexts.append(fighterFullContext)
             else:
-                fitSrcContext = "projectedFit"
-                fitItemContext = item.name
-                context = ((fitSrcContext, fitItemContext),)
+                fitSrcContext = 'projectedFit'
+                fitItemContext = 'Projected Item'
+                fitFullContext = (fitSrcContext, fitItemContext)
+                contexts.append(fitFullContext)
+        contexts.append(('projected',))
 
-        context += (("projected",),)
-        menu = ContextMenu.getMenu((item,) if item is not None else [], *context)
-
+        selection = self.getSelectedProjectors()
+        menu = ContextMenu.getMenu(self, mainItem, selection, *contexts)
         if menu is not None:
             self.PopupMenu(menu)
 
-    def remove(self, event):
+    def onLeftDoubleClick(self, event):
         row, _ = self.HitTest(event.Position)
         if row != -1:
             col = self.getColumn(event.Position)
             if col != self.getColIndex(State):
+                mainItem = self.get(row)
+                if mainItem is None:
+                    return
                 fitID = self.mainFrame.getActiveFit()
-                thing = self.get(row)
-                if thing:  # thing doesn't exist if it's the dummy value
-                    self.mainFrame.command.Submit(cmd.GuiRemoveProjectedCommand(fitID, thing))
+                modPressed = wx.GetMouseState().GetModifiers() == wx.MOD_ALT
+                if isinstance(mainItem, EosFit):
+                    self.mainFrame.command.Submit(cmd.GuiRemoveProjectedItemsCommand(
+                        fitID=fitID, items=[mainItem], amount=math.inf if modPressed else 1))
+                elif isinstance(mainItem, EosModule):
+                    if modPressed:
+                        fit = Fit.getInstance().getFit(fitID)
+                        positions = getSimilarModPositions(fit.projectedModules, mainItem)
+                        items = [fit.projectedModules[p] for p in positions]
+                    else:
+                        items = [mainItem]
+                    self.mainFrame.command.Submit(cmd.GuiRemoveProjectedItemsCommand(
+                        fitID=fitID, items=items, amount=1))
+                elif isinstance(mainItem, EosDrone):
+                    self.mainFrame.command.Submit(cmd.GuiRemoveProjectedItemsCommand(
+                        fitID=fitID, items=[mainItem], amount=math.inf if modPressed else 1))
+                elif isinstance(mainItem, EosFighter):
+                    if modPressed:
+                        fit = Fit.getInstance().getFit(fitID)
+                        items = getSimilarFighters(fit.projectedFighters, mainItem)
+                    else:
+                        items = [mainItem]
+                    self.mainFrame.command.Submit(cmd.GuiRemoveProjectedItemsCommand(
+                        fitID=fitID, items=items, amount=1))
+                else:
+                    self.mainFrame.command.Submit(cmd.GuiRemoveProjectedItemsCommand(
+                        fitID=fitID, items=[mainItem], amount=math.inf if modPressed else 1))
+
+    def getSelectedProjectors(self):
+        projectors = []
+        for row in self.getSelectedRows():
+            projector = self.get(row)
+            if projector is None:
+                continue
+            projectors.append(projector)
+        return projectors
+
+    # Context menu handlers
+    def addFit(self, fit):
+        if fit is None:
+            return
+        self.mainFrame.command.Submit(cmd.GuiAddProjectedFitsCommand(
+            fitID=self.mainFrame.getActiveFit(),
+            projectedFitIDs=[fit.ID],
+            amount=1))
+
+    def getExistingFitIDs(self):
+        return [f.ID for f in self.fits]
+
+    def addFitsByIDs(self, fitIDs):
+        if not fitIDs:
+            return
+        self.mainFrame.command.Submit(cmd.GuiAddProjectedFitsCommand(
+            fitID=self.mainFrame.getActiveFit(),
+            projectedFitIDs=fitIDs,
+            amount=1))

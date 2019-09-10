@@ -18,6 +18,7 @@ pyfalog = Logger(__name__)
 
 
 class ShipItem(SFItem.SFBrowserItem):
+
     def __init__(self, parent, shipID=None, shipFittingInfo=("Test", "TestTrait", 2), itemData=None, graphicID=None,
                  id=wx.ID_ANY, pos=wx.DefaultPosition,
                  size=(0, 40), style=0):
@@ -108,7 +109,7 @@ class ShipItem(SFItem.SFBrowserItem):
         pos = event.GetPosition()
         pos = self.ScreenToClient(pos)
         contexts = [("baseShip", "Ship Basic")]
-        menu = ContextMenu.getMenu(self.baseItem, *contexts)
+        menu = ContextMenu.getMenu(self, self.baseItem, (self.baseItem,), *contexts)
         self.PopupMenu(menu, pos)
 
     def OnTimer(self, event):
@@ -175,7 +176,9 @@ class ShipItem(SFItem.SFBrowserItem):
         self.Refresh()
 
     def editCheckEsc(self, event):
-        if event.GetKeyCode() == wx.WXK_ESCAPE:
+        keycode = event.GetKeyCode()
+        mstate = wx.GetMouseState()
+        if keycode == wx.WXK_ESCAPE and mstate.GetModifiers() == wx.MOD_NONE:
             self.tcFitName.Show(False)
         else:
             event.Skip()

@@ -1,33 +1,35 @@
 import wx
 from logbook import Logger
 
+from eos.saveddata.module import Module
 import gui.builtinMarketBrowser.pfSearchBox as SBox
-from gui.builtinMarketBrowser.events import ItemSelected, MAX_RECENTLY_USED_MODULES, RECENTLY_USED_MODULES
+from gui.builtinMarketBrowser.events import ItemSelected, RECENTLY_USED_MODULES
 from gui.contextMenu import ContextMenu
 from gui.display import Display
 from gui.utils.staticHelpers import DragDropHelper
 from service.attribute import Attribute
 from service.fit import Fit
+from config import slotColourMap
 
 pyfalog = Logger(__name__)
 
 
 class ItemView(Display):
+
     DEFAULT_COLS = ["Base Icon",
                     "Base Name",
                     "attr:power,,,True",
                     "attr:cpu,,,True"]
 
     def __init__(self, parent, marketBrowser):
-        Display.__init__(self, parent)
+        Display.__init__(self, parent, style=wx.LC_SINGLE_SEL)
         pyfalog.debug("Initialize ItemView")
-        marketBrowser.Bind(wx.EVT_TREE_SEL_CHANGED, self.selectionMade)
+        marketBrowser.Bind(wx.EVT_TREE_SEL_CHANGED, self.treeSelectionChanged)
 
         self.unfilteredStore = set()
         self.filteredStore = set()
-        self.recentlyUsedModules = set()
         self.sMkt = marketBrowser.sMkt
-        self.searchMode = marketBrowser.searchMode
+        self.sFit = Fit.getInstance()
 
         self.marketBrowser = marketBrowser
         self.marketView = marketBrowser.marketView
@@ -49,16 +51,12 @@ class ItemView(Display):
 
         # Make reverse map, used by sorter
         self.metaMap = self.makeReverseMetaMap()
-
-        # Fill up recently used modules set
-        pyfalog.debug("Fill up recently used modules set")
-        for itemID in self.sMkt.serviceMarketRecentlyUsedModules["pyfaMarketRecentlyUsedModules"]:
-            self.recentlyUsedModules.add(self.sMkt.getItem(itemID))
+        self.active = []
 
     def delaySearch(self, evt):
         sFit = Fit.getInstance()
         self.searchTimer.Stop()
-        self.searchTimer.Start(sFit.serviceFittingOptions["marketSearchDelay"], True)  # 150ms
+        self.searchTimer.Start(sFit.serviceFittingOptions["marketSearchDelay"], True)
 
     def startDrag(self, event):
         row = self.GetFirstSelected()
@@ -81,22 +79,13 @@ class ItemView(Display):
             return
 
         if self.mainFrame.getActiveFit():
-
-            self.storeRecentlyUsedMarketItem(self.active[sel].ID)
-            self.recentlyUsedModules = set()
-            for itemID in self.sMkt.serviceMarketRecentlyUsedModules["pyfaMarketRecentlyUsedModules"]:
-                self.recentlyUsedModules.add(self.sMkt.getItem(itemID))
-
             wx.PostEvent(self.mainFrame, ItemSelected(itemID=self.active[sel].ID))
 
-    def storeRecentlyUsedMarketItem(self, itemID):
-        if len(self.sMkt.serviceMarketRecentlyUsedModules["pyfaMarketRecentlyUsedModules"]) > MAX_RECENTLY_USED_MODULES:
-            self.sMkt.serviceMarketRecentlyUsedModules["pyfaMarketRecentlyUsedModules"].pop(0)
+    def treeSelectionChanged(self, event=None):
+        self.selectionMade('tree')
 
-        self.sMkt.serviceMarketRecentlyUsedModules["pyfaMarketRecentlyUsedModules"].append(itemID)
-
-    def selectionMade(self, event=None):
-        self.marketBrowser.searchMode = False
+    def selectionMade(self, context):
+        self.marketBrowser.mode = 'normal'
         # Grab the threeview selection and check if it's fine
         sel = self.marketView.GetSelection()
         if sel.IsOk():
@@ -116,7 +105,7 @@ class ItemView(Display):
             else:
                 # If method was called but selection wasn't actually made or we have a hit on recently used modules
                 if seldata == RECENTLY_USED_MODULES:
-                    items = self.recentlyUsedModules
+                    items = self.sMkt.getRecentlyUsed()
                 else:
                     items = set()
 
@@ -124,26 +113,47 @@ class ItemView(Display):
             self.updateItemStore(items)
 
             # Set toggle buttons / use search mode flag if recently used modules category is selected (in order to have all modules listed and not filtered)
-            if seldata is not RECENTLY_USED_MODULES:
-                self.setToggles()
-            else:
-                self.marketBrowser.searchMode = True
-                self.setToggles()
+            if seldata == RECENTLY_USED_MODULES:
+                self.marketBrowser.mode = 'recent'
 
-            # Update filtered items
+            self.setToggles()
+            if context == 'tree' and self.marketBrowser.settings.get('marketMGMarketSelectMode') == 1:
+                for btn in self.marketBrowser.metaButtons:
+                    if not btn.GetValue():
+                        btn.setUserSelection(True)
             self.filterItemStore()
 
     def updateItemStore(self, items):
         self.unfilteredStore = items
 
     def filterItemStore(self):
+        filteredItems = self.filterItems()
+        if len(filteredItems) == 0 and len(self.unfilteredStore) > 0:
+            setting = self.marketBrowser.settings.get('marketMGEmptyMode')
+            # Enable leftmost available
+            if setting == 1:
+                for btn in self.marketBrowser.metaButtons:
+                    if btn.IsEnabled() and not btn.userSelected:
+                        btn.setUserSelection(True)
+                        break
+                filteredItems = self.filterItems()
+            # Enable all
+            elif setting == 2:
+                for btn in self.marketBrowser.metaButtons:
+                    if btn.IsEnabled() and not btn.userSelected:
+                        btn.setUserSelection(True)
+                filteredItems = self.filterItems()
+        self.filteredStore = filteredItems
+        self.update(self.filteredStore)
+
+    def filterItems(self):
         sMkt = self.sMkt
         selectedMetas = set()
         for btn in self.marketBrowser.metaButtons:
-            if btn.GetValue():
+            if btn.userSelected:
                 selectedMetas.update(sMkt.META_MAP[btn.metaName])
-        self.filteredStore = sMkt.filterItemsByMeta(self.unfilteredStore, selectedMetas)
-        self.update(list(self.filteredStore))
+        filteredItems = sMkt.filterItemsByMeta(self.unfilteredStore, selectedMetas)
+        return filteredItems
 
     def setToggles(self):
         metaIDs = set()
@@ -166,10 +176,10 @@ class ItemView(Display):
         realsearch = search.replace("*", "")
         # Re-select market group if search query has zero length
         if len(realsearch) == 0:
-            self.selectionMade()
+            self.selectionMade('search')
             return
 
-        self.marketBrowser.searchMode = True
+        self.marketBrowser.mode = 'search'
         self.sMkt.searchItems(search, self.populateSearch)
 
     def clearSearch(self, event=None):
@@ -179,14 +189,15 @@ class ItemView(Display):
         if event:
             self.marketBrowser.search.Clear()
 
-        self.marketBrowser.searchMode = False
-        self.updateItemStore(set())
-        self.setToggles()
-        self.filterItemStore()
+        if self.marketBrowser.mode == 'search':
+            self.marketBrowser.mode = 'normal'
+            self.updateItemStore(set())
+            self.setToggles()
+            self.filterItemStore()
 
     def populateSearch(self, items):
         # If we're no longer searching, dump the results
-        if self.marketBrowser.searchMode is False:
+        if self.marketBrowser.mode != 'search':
             return
         self.updateItemStore(items)
         self.setToggles()
@@ -199,7 +210,7 @@ class ItemView(Display):
             mktgrpid = sMkt.getMarketGroupByItem(item).ID
         except AttributeError:
             mktgrpid = -1
-            print(("unable to find market group for", item.name))
+            pyfalog.warning("unable to find market group for {}".format(item.name))
         parentname = sMkt.getParentItemByItem(item).name
         # Get position of market group
         metagrpid = sMkt.getMetaGroupIdByItem(item)
@@ -209,18 +220,19 @@ class ItemView(Display):
         return catname, mktgrpid, parentname, metatab, metalvl, item.name
 
     def contextMenu(self, event):
+        clickedPos = self.getRowByAbs(event.Position)
+        self.ensureSelection(clickedPos)
+
         # Check if something is selected, if so, spawn the menu for it
-        sel = self.GetFirstSelected()
-        if sel == -1:
+        if clickedPos == -1:
             return
 
-        item = self.active[sel]
-
+        item = self.active[clickedPos]
         sMkt = self.sMkt
-        sourceContext = "marketItemGroup" if self.marketBrowser.searchMode is False else "marketItemMisc"
+        sourceContext = "marketItemMisc" if self.marketBrowser.mode in ("search", "recent") else "marketItemGroup"
         itemContext = sMkt.getCategoryByItem(item).name
 
-        menu = ContextMenu.getMenu((item,), (sourceContext, itemContext))
+        menu = ContextMenu.getMenu(self, item, (item,), (sourceContext, itemContext))
         self.PopupMenu(menu)
 
     def populate(self, items):
@@ -231,9 +243,10 @@ class ItemView(Display):
             sMkt = self.sMkt
             self.metalvls = sMkt.directAttrRequest(items, attrs)
             # Clear selection
-            self.deselectItems()
+            self.unselectAll()
             # Perform sorting, using item's meta levels besides other stuff
-            items.sort(key=self.itemSort)
+            if self.marketBrowser.mode != 'recent':
+                items.sort(key=self.itemSort)
         # Mark current item list as active
         self.active = items
         # Show them
@@ -247,7 +260,8 @@ class ItemView(Display):
             sMkt = self.sMkt
             self.metalvls = sMkt.directAttrRequest(items, attrs)
             # Re-sort stuff
-            items.sort(key=self.itemSort)
+            if self.marketBrowser.mode != 'recent':
+                items.sort(key=self.itemSort)
 
         for i, item in enumerate(items[:9]):
             # set shortcut info for first 9 modules
@@ -266,3 +280,9 @@ class ItemView(Display):
                 revmap[mgid] = i
             i += 1
         return revmap
+
+    def columnBackground(self, colItem, item):
+        if self.sFit.serviceFittingOptions["colorFitBySlot"]:
+            return slotColourMap.get(Module.calculateSlot(item)) or self.GetBackgroundColour()
+        else:
+            return self.GetBackgroundColour()

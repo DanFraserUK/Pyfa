@@ -23,14 +23,17 @@ import urllib.request
 import urllib.error
 import urllib.parse
 
+from logbook import Logger
+
 import config
 import eos.config
-from logbook import Logger
+from service.const import GraphDpsDroneMode
+
 
 pyfalog = Logger(__name__)
 
 
-class SettingsProvider(object):
+class SettingsProvider:
     if config.savePath:
         BASE_PATH = os.path.join(config.savePath, 'settings')
     settings = {}
@@ -48,37 +51,6 @@ class SettingsProvider(object):
             if not os.path.exists(self.BASE_PATH):
                 os.mkdir(self.BASE_PATH)
 
-    # def getSettings(self, area, defaults=None):
-    #     # type: (basestring, dict) -> service.Settings
-    #     # NOTE: needed to change for tests
-    #     settings_obj = self.settings.get(area)
-    #
-    #     if settings_obj is None and hasattr(self, 'BASE_PATH'):
-    #         canonical_path = os.path.join(self.BASE_PATH, area)
-    #
-    #         if not os.path.exists(canonical_path):
-    #             info = {}
-    #             if defaults:
-    #                 for item in defaults:
-    #                     info[item] = defaults[item]
-    #
-    #         else:
-    #             try:
-    #                 f = open(canonical_path, "rb")
-    #                 info = cPickle.load(f)
-    #                 for item in defaults:
-    #                     if item not in info:
-    #                         info[item] = defaults[item]
-    #
-    #             except:
-    #                 info = {}
-    #                 if defaults:
-    #                     for item in defaults:
-    #                         info[item] = defaults[item]
-    #
-    #         self.settings[area] = settings_obj = Settings(canonical_path, info)
-    #
-    #     return settings_obj
     def getSettings(self, area, defaults=None):
         # type: (basestring, dict) -> service.Settings
         # NOTE: needed to change for tests
@@ -109,7 +81,7 @@ class SettingsProvider(object):
             settings.save()
 
 
-class Settings(object):
+class Settings:
     def __init__(self, location, info):
         # type: (basestring, dict) -> None
         # path string or empty string.
@@ -160,7 +132,7 @@ class Settings(object):
         return list(self.info.items())
 
 
-class NetworkSettings(object):
+class NetworkSettings:
     _instance = None
 
     # constants for serviceNetworkDefaultSettings["mode"] parameter
@@ -307,7 +279,7 @@ class NetworkSettings(object):
         return proxies
 
 
-class HTMLExportSettings(object):
+class HTMLExportSettings:
     """
     Settings used by the HTML export feature.
     """
@@ -343,7 +315,7 @@ class HTMLExportSettings(object):
         self.serviceHTMLExportSettings["path"] = path
 
 
-class UpdateSettings(object):
+class UpdateSettings:
     """
     Settings used by update notification
     """
@@ -374,7 +346,7 @@ class UpdateSettings(object):
         self.serviceUpdateSettings[type] = value
 
 
-class EsiSettings(object):
+class EsiSettings:
     _instance = None
 
     @classmethod
@@ -410,7 +382,7 @@ class EsiSettings(object):
         self.settings[type] = value
 
 
-class StatViewSettings(object):
+class StatViewSettings:
     _instance = None
 
     @classmethod
@@ -438,12 +410,6 @@ class StatViewSettings(object):
             "outgoing"     : 2,
         }
 
-        # We don't have these....yet
-        '''
-        "miningyield": 2,
-        "drones": 2
-        '''
-
         self.serviceStatViewDefaultSettings = SettingsProvider.getInstance().getSettings("pyfaServiceStatViewSettings", serviceStatViewDefaultSettings)
 
     def get(self, type):
@@ -453,13 +419,13 @@ class StatViewSettings(object):
         self.serviceStatViewDefaultSettings[type] = value
 
 
-class PriceMenuSettings(object):
+class MarketPriceSettings:
     _instance = None
 
     @classmethod
     def getInstance(cls):
         if cls._instance is None:
-            cls._instance = PriceMenuSettings()
+            cls._instance = MarketPriceSettings()
 
         return cls._instance
 
@@ -468,11 +434,13 @@ class PriceMenuSettings(object):
         # 0 - Do not add to total
         # 1 - Add to total
         PriceMenuDefaultSettings = {
-            "ship" : 1,
-            "modules" : 1,
-            "drones" : 0,
-            "cargo" : 0,
-            "character" : 0
+            "drones" : 1,
+            "cargo" : 1,
+            "character" : 0,
+            "marketMGJumpMode": 0,
+            "marketMGEmptyMode": 1,
+            "marketMGSearchMode": 0,
+            "marketMGMarketSelectMode": 0
         }
 
         self.PriceMenuDefaultSettings = SettingsProvider.getInstance().getSettings("pyfaPriceMenuSettings",
@@ -485,7 +453,7 @@ class PriceMenuSettings(object):
         self.PriceMenuDefaultSettings[type] = value
 
 
-class ContextMenuSettings(object):
+class ContextMenuSettings:
     _instance = None
 
     @classmethod
@@ -501,31 +469,12 @@ class ContextMenuSettings(object):
         # 1 - Show
         ContextMenuDefaultSettings = {
             "ammoPattern"           : 1,
-            "amount"                : 1,
-            "cargo"                 : 1,
-            "cargoAmmo"             : 1,
             "changeAffectingSkills" : 1,
-            "damagePattern"         : 1,
-            "droneRemoveStack"      : 1,
-            "droneSplit"            : 1,
-            "droneStack"            : 1,
-            "factorReload"          : 1,
-            "fighterAbilities"      : 1,
-            "implantSets"           : 1,
-            "itemStats"             : 1,
-            "itemRemove"            : 1,
-            "marketJump"            : 1,
             "metaSwap"              : 1,
-            "moduleAmmoPicker"      : 1,
-            "moduleGlobalAmmoPicker": 1,
-            "openFit"               : 1,
-            "priceClear"            : 1,
             "project"               : 1,
-            "shipJump"              : 1,
-            "tacticalMode"          : 1,
-            "targetResists"         : 1,
-            "whProjector"           : 1,
             "moduleFill"            : 1,
+            "spoolup"               : 1,
+            "additionsCopyPaste"    : 1,
         }
 
         self.ContextMenuDefaultSettings = SettingsProvider.getInstance().getSettings("pyfaContextMenuSettings", ContextMenuDefaultSettings)
@@ -537,7 +486,7 @@ class ContextMenuSettings(object):
         self.ContextMenuDefaultSettings[type] = value
 
 
-class EOSSettings(object):
+class EOSSettings:
         _instance = None
 
         @classmethod
@@ -556,4 +505,26 @@ class EOSSettings(object):
         def set(self, type, value):
             self.EOSSettings[type] = value
 
-# @todo: migrate fit settings (from fit service) here?
+
+class GraphSettings:
+
+    _instance = None
+
+    @classmethod
+    def getInstance(cls):
+        if cls._instance is None:
+            cls._instance = GraphSettings()
+        return cls._instance
+
+    def __init__(self):
+        defaults = {
+            'mobileDroneMode': GraphDpsDroneMode.auto,
+            'ignoreResists': True,
+            'applyProjected': True}
+        self.settings = SettingsProvider.getInstance().getSettings('graphSettings', defaults)
+
+    def get(self, type):
+        return self.settings[type]
+
+    def set(self, type, value):
+        self.settings[type] = value

@@ -17,57 +17,64 @@
 # along with eos.  If not, see <http://www.gnu.org/licenses/>.
 # ===============================================================================
 
+import datetime
 import time
 from copy import deepcopy
 from itertools import chain
-from math import sqrt, log, asinh
-import datetime
 
-from sqlalchemy.orm import validates, reconstructor
+from logbook import Logger
+from math import asinh, log, sqrt
+from sqlalchemy.orm import reconstructor, validates
 
 import eos.db
 from eos import capSim
-from eos.effectHandlerHelpers import HandledModuleList, HandledDroneCargoList, HandledImplantBoosterList, HandledProjectedDroneList, HandledProjectedModList
-from eos.enum import Enum
-from eos.saveddata.ship import Ship
-from eos.saveddata.drone import Drone
+from eos.const import CalcType, FitSystemSecurity, FittingHardpoint, FittingModuleState, FittingSlot, ImplantLocation
+from eos.effectHandlerHelpers import (
+    HandledBoosterList, HandledDroneCargoList, HandledImplantList,
+    HandledModuleList, HandledProjectedDroneList, HandledProjectedModList)
 from eos.saveddata.character import Character
 from eos.saveddata.citadel import Citadel
-from eos.saveddata.module import Module, State, Slot, Hardpoint
-from eos.utils.stats import DmgTypes
-from logbook import Logger
+from eos.saveddata.module import Module
+from eos.saveddata.ship import Ship
+from eos.utils.stats import DmgTypes, RRTypes
+
+
 pyfalog = Logger(__name__)
 
 
-class ImplantLocation(Enum):
-    FIT = 0
-    CHARACTER = 1
+class FitLite:
+
+    def __init__(self, id=None, name=None, shipID=None, shipName=None, shipNameShort=None):
+        self.ID = id
+        self.name = name
+        self.shipID = shipID
+        self.shipName = shipName
+        self.shipNameShort = shipNameShort
+
+    def __repr__(self):
+        return 'FitLite(ID={})'.format(self.ID)
 
 
-class CalcType(Enum):
-    LOCAL = 0
-    PROJECTED = 1
-    COMMAND = 2
-
-
-class Fit(object):
+class Fit:
     """Represents a fitting, with modules, ship, implants, etc."""
 
     PEAK_RECHARGE = 0.25
 
     def __init__(self, ship=None, name=""):
         """Initialize a fit from the program"""
+        self.__ship = None
+        self.__mode = None
         # use @mode.setter's to set __attr and IDs. This will set mode as well
         self.ship = ship
         if self.ship:
-            self.ship.parent = self
+            self.ship.owner = self
 
         self.__modules = HandledModuleList()
         self.__drones = HandledDroneCargoList()
         self.__fighters = HandledDroneCargoList()
         self.__cargo = HandledDroneCargoList()
-        self.__implants = HandledImplantBoosterList()
-        self.__boosters = HandledImplantBoosterList()
+        self.__implants = HandledImplantList()
+        self.__boosters = HandledBoosterList()
         # self.__projectedFits = {}
         self.__projectedModules = HandledProjectedModList()
         self.__projectedDrones = HandledProjectedDroneList()
@@ -112,9 +119,9 @@ class Fit(object):
         if self.modeID and self.__ship:
             item = eos.db.getItem(self.modeID)
             # Don't need to verify if it's a proper item, as validateModeItem assures this
-            self.__mode = self.ship.validateModeItem(item)
+            self.__mode = self.ship.validateModeItem(item, owner=self)
         else:
-            self.__mode = self.ship.validateModeItem(None)
+            self.__mode = self.ship.validateModeItem(None, owner=self)
 
         self.build()
 
@@ -136,6 +143,7 @@ class Fit(object):
         self.__capState = None
         self.__capUsed = None
         self.__capRecharge = None
+        self.__savedCapSimData = {}
         self.__calculatedTargets = []
         self.factorReload = False
         self.boostsFits = set()
@@ -143,13 +151,25 @@ class Fit(object):
         self.ecmProjectedStr = 1
         self.commandBonuses = {}
 
-    @property
-    def targetResists(self):
-        return self.__targetResists
+    def clearFactorReloadDependentData(self):
+        # Here we clear all data known to rely on cycle parameters
+        # (which, in turn, relies on factor reload flag)
+        self.__weaponDpsMap.clear()
+        self.__droneDps = None
+        self.__remoteRepMap.clear()
+        self.__capStable = None
+        self.__capState = None
+        self.__capUsed = None
+        self.__capRecharge = None
+        self.__savedCapSimData.clear()
 
-    @targetResists.setter
-    def targetResists(self, targetResists):
-        self.__targetResists = targetResists
+    @property
+    def targetProfile(self):
+        return self.__targetProfile
+
+    @targetProfile.setter
+    def targetProfile(self, targetProfile):
+        self.__targetProfile = targetProfile
         self.__weaponDpsMap = {}
         self.__weaponVolleyMap = {}
         self.__droneDps = None
@@ -175,8 +195,12 @@ class Fit(object):
 
     @mode.setter
     def mode(self, mode):
+        if self.__mode is not None:
+            self.__mode.owner = None
         self.__mode = mode
         self.modeID = mode.item.ID if mode is not None else None
+        if mode is not None:
+            mode.owner = self
 
     @property
     def modifiedCoalesce(self):
@@ -209,11 +233,14 @@ class Fit(object):
 
     @ship.setter
     def ship(self, ship):
+        if self.__ship is not None:
+            self.__ship.owner = None
         self.__ship = ship
         self.shipID = ship.item.ID if ship is not None else None
         if ship is not None:
+            ship.owner = self
             #  set mode of new ship
-            self.mode = self.ship.validateModeItem(None) if ship is not None else None
+            self.mode = self.ship.validateModeItem(None, owner=self) if ship is not None else None
             # set fit attributes the same as ship
             self.extraAttributes = self.ship.itemModifiedAttributes
 
@@ -393,6 +420,32 @@ class Fit(object):
         else:
             return val
 
+    def canFit(self, item):
+        # Whereas Module.fits() deals with current state of the fit in order to determine if somethign fits (for example maxGroupFitted which can be modified by effects),
+        # this function should be used against Items to see if the item is even allowed on the fit with rules that don't change
+
+        fitsOnType = set()
+        fitsOnGroup = set()
+
+        shipType = item.attributes.get("fitsToShipType", None)
+        if shipType is not None:
+            fitsOnType.add(shipType.value)
+
+        fitsOnType.update([item.attributes[attr].value for attr in item.attributes if attr.startswith("canFitShipType")])
+        fitsOnGroup.update([item.attributes[attr].value for attr in item.attributes if attr.startswith("canFitShipGroup")])
+
+        if (len(fitsOnGroup) > 0 or len(fitsOnType) > 0) \
+                and self.ship.item.group.ID not in fitsOnGroup \
+                and self.ship.item.ID not in fitsOnType:
+            return False
+
+        # Citadel modules are now under a new category, so we can check this to ensure only structure modules can fit on a citadel
+        if isinstance(self.ship, Citadel) and item.category.name != "Structure Module" or \
+                not isinstance(self.ship, Citadel) and item.category.name == "Structure Module":
+            return False
+
+        return True
+
     def clear(self, projected=False, command=False):
         self.__effectiveTank = None
         self.__weaponDpsMap = {}
@@ -410,6 +463,7 @@ class Fit(object):
         self.__capState = None
         self.__capUsed = None
         self.__capRecharge = None
+        self.__savedCapSimData.clear()
         self.ecmProjectedStr = 1
         # self.commandBonuses = {}
 
@@ -457,7 +511,7 @@ class Fit(object):
             if hasattr(currModifier.itemModifiedAttributes, "fit"):
                 currModifier.itemModifiedAttributes.fit = origin or self
         if hasattr(currModifier, "chargeModifiedAttributes"):
-            if hasattr(currModifier.itemModifiedAttributes, "fit"):
+            if hasattr(currModifier.chargeModifiedAttributes, "fit"):
                 currModifier.chargeModifiedAttributes.fit = origin or self
 
     def getModifier(self):
@@ -483,7 +537,6 @@ class Fit(object):
                 continue
 
             # This should always be a gang effect, otherwise it wouldn't be added to commandBonuses
-            # @todo: Check this
             if effect.isType("gang"):
                 self.register(thing)
 
@@ -741,7 +794,7 @@ class Fit(object):
                 The type of calculation our current iteration is in. This helps us determine the interactions between
                 fits that rely on others for proper calculations
         """
-        pyfalog.info("Starting fit calculation on: {0}, calc: {1}", repr(self), CalcType.getName(type))
+        pyfalog.info("Starting fit calculation on: {0}, calc: {1}", repr(self), CalcType(type).name)
 
         # If we are projecting this fit onto another one, collect the projection info for later use
 
@@ -899,25 +952,28 @@ class Fit(object):
         recalc. Figure out a way to keep track of any changes to slot layout and call this automatically
         """
         if self.ship is None:
-            return
+            return {}
 
-        for slotType in (Slot.LOW, Slot.MED, Slot.HIGH, Slot.RIG, Slot.SUBSYSTEM, Slot.SERVICE):
+        # Look for any dummies of that type to remove
+        posToRemove = {}
+        for slotType in (FittingSlot.LOW.value, FittingSlot.MED.value, FittingSlot.HIGH.value, FittingSlot.RIG.value, FittingSlot.SUBSYSTEM.value, FittingSlot.SERVICE.value):
             amount = self.getSlotsFree(slotType, True)
             if amount > 0:
                 for _ in range(int(amount)):
                     self.modules.append(Module.buildEmpty(slotType))
 
             if amount < 0:
-                # Look for any dummies of that type to remove
-                toRemove = []
                 for mod in self.modules:
                     if mod.isEmpty and mod.slot == slotType:
-                        toRemove.append(mod)
+                        pos = self.modules.index(mod)
+                        posToRemove[pos] = slotType
                         amount += 1
                         if amount == 0:
                             break
-                for mod in toRemove:
-                    self.modules.remove(mod)
+        for pos in sorted(posToRemove, reverse=True):
+            mod = self.modules[pos]
+            self.modules.remove(mod)
+        return posToRemove
 
     def unfill(self):
         for i in range(len(self.modules) - 1, -1, -1):
@@ -948,7 +1004,7 @@ class Fit(object):
     def getItemAttrOnlineSum(dict, attr):
         amount = 0
         for mod in dict:
-            add = mod.getModifiedItemAttr(attr) if mod.state >= State.ONLINE else None
+            add = mod.getModifiedItemAttr(attr) if mod.state >= FittingModuleState.ONLINE else None
             if add is not None:
                 amount += add
 
@@ -967,29 +1023,29 @@ class Fit(object):
 
         for mod in chain(self.modules, self.fighters):
             if mod.slot is type and (not getattr(mod, "isEmpty", False) or countDummies):
-                if type in (Slot.F_HEAVY, Slot.F_SUPPORT, Slot.F_LIGHT, Slot.FS_HEAVY, Slot.FS_LIGHT, Slot.FS_SUPPORT) and not mod.active:
+                if type in (FittingSlot.F_HEAVY, FittingSlot.F_SUPPORT, FittingSlot.F_LIGHT, FittingSlot.FS_HEAVY, FittingSlot.FS_LIGHT, FittingSlot.FS_SUPPORT) and not mod.active:
                     continue
                 amount += 1
 
         return amount
 
     slots = {
-        Slot.LOW      : "lowSlots",
-        Slot.MED      : "medSlots",
-        Slot.HIGH     : "hiSlots",
-        Slot.RIG      : "rigSlots",
-        Slot.SUBSYSTEM: "maxSubSystems",
-        Slot.SERVICE  : "serviceSlots",
-        Slot.F_LIGHT  : "fighterLightSlots",
-        Slot.F_SUPPORT: "fighterSupportSlots",
-        Slot.F_HEAVY  : "fighterHeavySlots",
-        Slot.FS_LIGHT: "fighterStandupLightSlots",
-        Slot.FS_SUPPORT: "fighterStandupSupportSlots",
-        Slot.FS_HEAVY: "fighterStandupHeavySlots",
+        FittingSlot.LOW      : "lowSlots",
+        FittingSlot.MED      : "medSlots",
+        FittingSlot.HIGH     : "hiSlots",
+        FittingSlot.RIG      : "rigSlots",
+        FittingSlot.SUBSYSTEM: "maxSubSystems",
+        FittingSlot.SERVICE  : "serviceSlots",
+        FittingSlot.F_LIGHT  : "fighterLightSlots",
+        FittingSlot.F_SUPPORT: "fighterSupportSlots",
+        FittingSlot.F_HEAVY  : "fighterHeavySlots",
+        FittingSlot.FS_LIGHT: "fighterStandupLightSlots",
+        FittingSlot.FS_SUPPORT: "fighterStandupSupportSlots",
+        FittingSlot.FS_HEAVY: "fighterStandupHeavySlots",
     }
 
     def getSlotsFree(self, type, countDummies=False):
-        if type in (Slot.MODE, Slot.SYSTEM):
+        if type in (FittingSlot.MODE, FittingSlot.SYSTEM):
             # These slots don't really exist, return default 0
             return 0
 
@@ -1001,12 +1057,12 @@ class Fit(object):
         return self.ship.getModifiedItemAttr(self.slots[type]) or 0
 
     def getHardpointsFree(self, type):
-        if type == Hardpoint.NONE:
+        if type == FittingHardpoint.NONE:
             return 1
-        elif type == Hardpoint.TURRET:
-            return self.ship.getModifiedItemAttr('turretSlotsLeft') - self.getHardpointsUsed(Hardpoint.TURRET)
-        elif type == Hardpoint.MISSILE:
-            return self.ship.getModifiedItemAttr('launcherSlotsLeft') - self.getHardpointsUsed(Hardpoint.MISSILE)
+        elif type == FittingHardpoint.TURRET:
+            return self.ship.getModifiedItemAttr('turretSlotsLeft') - self.getHardpointsUsed(FittingHardpoint.TURRET)
+        elif type == FittingHardpoint.MISSILE:
+            return self.ship.getModifiedItemAttr('launcherSlotsLeft') - self.getHardpointsUsed(FittingHardpoint.MISSILE)
         else:
             raise ValueError("%d is not a valid value for Hardpoint Enum", type)
 
@@ -1042,7 +1098,7 @@ class Fit(object):
     def fighterBayUsed(self):
         amount = 0
         for f in self.fighters:
-            amount += f.item.volume * f.amountActive
+            amount += f.item.volume * f.amount
 
         return amount
 
@@ -1052,8 +1108,11 @@ class Fit(object):
         for f in self.fighters:
             if f.active:
                 amount += 1
-
         return amount
+
+    @property
+    def fighterTubesTotal(self):
+        return self.ship.getModifiedItemAttr("fighterTubes")
 
     @property
     def cargoBayUsed(self):
@@ -1135,9 +1194,15 @@ class Fit(object):
 
         return self.__capRecharge
 
-    def calculateCapRecharge(self, percent=PEAK_RECHARGE):
-        capacity = self.ship.getModifiedItemAttr("capacitorCapacity")
-        rechargeRate = self.ship.getModifiedItemAttr("rechargeRate") / 1000.0
+    @property
+    def capDelta(self):
+        return (self.__capRecharge or 0) - (self.__capUsed or 0)
+
+    def calculateCapRecharge(self, percent=PEAK_RECHARGE, capacity=None, rechargeRate=None):
+        if capacity is None:
+            capacity = self.ship.getModifiedItemAttr("capacitorCapacity")
+        if rechargeRate is None:
+            rechargeRate = self.ship.getModifiedItemAttr("rechargeRate") / 1000.0
         return 10 / rechargeRate * sqrt(percent) * (1 - sqrt(percent)) * capacity
 
     def calculateShieldRecharge(self, percent=PEAK_RECHARGE):
@@ -1167,29 +1232,39 @@ class Fit(object):
         drains = []
         capUsed = 0
         capAdded = 0
-        for mod in self.modules:
-            if mod.state >= State.ACTIVE:
-                if (mod.getModifiedItemAttr("capacitorNeed") or 0) != 0:
-                    cycleTime = mod.rawCycleTime or 0
-                    reactivationTime = mod.getModifiedItemAttr("moduleReactivationDelay") or 0
-                    fullCycleTime = cycleTime + reactivationTime
-                    reloadTime = mod.reloadTime
-                    if fullCycleTime > 0:
-                        capNeed = mod.capUse
-                        if capNeed > 0:
-                            capUsed += capNeed
-                        else:
-                            capAdded -= capNeed
+        for mod in self.activeModulesIter():
+            if (mod.getModifiedItemAttr("capacitorNeed") or 0) != 0:
+                cycleTime = mod.rawCycleTime or 0
+                reactivationTime = mod.getModifiedItemAttr("moduleReactivationDelay") or 0
+                fullCycleTime = cycleTime + reactivationTime
+                reloadTime = mod.reloadTime
+                if fullCycleTime > 0:
+                    capNeed = mod.capUse
+                    if capNeed > 0:
+                        capUsed += capNeed
+                    else:
+                        capAdded -= capNeed
 
-                        # If this is a turret, don't stagger activations
-                        disableStagger = mod.hardpoint == Hardpoint.TURRET
+                    # If this is a turret, don't stagger activations
+                    disableStagger = mod.hardpoint == FittingHardpoint.TURRET
 
-                        drains.append((int(fullCycleTime), mod.getModifiedItemAttr("capacitorNeed") or 0,
-                                       mod.numShots or 0, disableStagger, reloadTime))
+                    drains.append((
+                        int(fullCycleTime),
+                        mod.getModifiedItemAttr("capacitorNeed") or 0,
+                        mod.numShots or 0,
+                        disableStagger,
+                        reloadTime,
+                        mod.item.group.name == 'Capacitor Booster'))
 
         for fullCycleTime, capNeed, clipSize, reloadTime in self.iterDrains():
-            # Stagger incoming effects for cap simulation
-            drains.append((int(fullCycleTime), capNeed, clipSize, False, reloadTime))
+            drains.append((
+                int(fullCycleTime),
+                capNeed,
+                clipSize,
+                # Stagger incoming effects for cap simulation
+                False,
+                reloadTime,
+                False))
             if capNeed > 0:
                 capUsed += capNeed / (fullCycleTime / 1000.0)
             else:
@@ -1200,17 +1275,8 @@ class Fit(object):
     def simulateCap(self):
         drains, self.__capUsed, self.__capRecharge = self.__generateDrain()
         self.__capRecharge += self.calculateCapRecharge()
-        if len(drains) > 0:
-            sim = capSim.CapSimulator()
-            sim.init(drains)
-            sim.capacitorCapacity = self.ship.getModifiedItemAttr("capacitorCapacity")
-            sim.capacitorRecharge = self.ship.getModifiedItemAttr("rechargeRate")
-            sim.stagger = True
-            sim.scale = False
-            sim.t_max = 6 * 60 * 60 * 1000
-            sim.reload = self.factorReload
-            sim.run()
-
+        sim = self.__runCapSim(drains=drains)
+        if sim is not None:
             capState = (sim.cap_stable_low + sim.cap_stable_high) / (2 * sim.capacitorCapacity)
             self.__capStable = capState > 0
             self.__capState = min(100, capState * 100) if self.__capStable else sim.t / 1000.0
@@ -1218,23 +1284,55 @@ class Fit(object):
             self.__capStable = True
             self.__capState = 100
 
+    def getCapSimData(self, startingCap):
+        if startingCap not in self.__savedCapSimData:
+            self.__runCapSim(startingCap=startingCap, tMax=3600, optimizeRepeats=False)
+        return self.__savedCapSimData[startingCap]
+
+    def __runCapSim(self, drains=None, startingCap=None, tMax=None, optimizeRepeats=True):
+        if drains is None:
+            drains, nil, nil = self.__generateDrain()
+        if tMax is None:
+            tMax = 6 * 60 * 60 * 1000
+        else:
+            tMax *= 1000
+        if len(drains) > 0:
+            sim = capSim.CapSimulator()
+            sim.init(drains)
+            sim.capacitorCapacity = self.ship.getModifiedItemAttr("capacitorCapacity")
+            sim.capacitorRecharge = self.ship.getModifiedItemAttr("rechargeRate")
+            sim.startingCapacity = startingCap = self.ship.getModifiedItemAttr("capacitorCapacity") if startingCap is None else startingCap
+            sim.stagger = True
+            sim.scale = False
+            sim.t_max = tMax
+            sim.reload = self.factorReload
+            sim.optimize_repeats = optimizeRepeats
+            sim.run()
+            # We do not want to store partial results
+            if not sim.result_optimized_repeats:
+                self.__savedCapSimData[startingCap] = sim.saved_changes
+            return sim
+        else:
+            self.__savedCapSimData[startingCap] = []
+            return None
+
+    def getCapRegenGainFromMod(self, mod):
+        """Return how much cap regen do we gain from having this module"""
+        currentRegen = self.calculateCapRecharge()
+        nomodRegen = self.calculateCapRecharge(
+            capacity=self.ship.getModifiedItemAttrExtended("capacitorCapacity", ignoreAfflictors=[mod]),
+            rechargeRate=self.ship.getModifiedItemAttrExtended("rechargeRate", ignoreAfflictors=[mod]) / 1000.0)
+        return currentRegen - nomodRegen
+
     def getRemoteReps(self, spoolOptions=None):
         if spoolOptions not in self.__remoteRepMap:
-            remoteReps = {}
+            remoteReps = RRTypes(0, 0, 0, 0)
 
             for module in self.modules:
-                rrType, rrAmount = module.getRemoteReps(spoolOptions=spoolOptions)
-                if rrType:
-                    if rrType not in remoteReps:
-                        remoteReps[rrType] = 0
-                    remoteReps[rrType] += rrAmount
+                remoteReps += module.getRemoteReps(spoolOptions=spoolOptions)
 
             for drone in self.drones:
-                rrType, rrAmount = drone.getRemoteReps()
-                if rrType:
-                    if rrType not in remoteReps:
-                        remoteReps[rrType] = 0
-                    remoteReps[rrType] += rrAmount
+                remoteReps += drone.getRemoteReps()
 
             self.__remoteRepMap[spoolOptions] = remoteReps
 
@@ -1329,47 +1427,47 @@ class Fit(object):
                 for tankType in localAdjustment:
                     dict = self.extraAttributes.getAfflictions(tankType)
                     if self in dict:
-                        for mod, _, amount, used in dict[self]:
+                        for afflictor, operator, stackingGroup, preResAmount, postResAmount, used in dict[self]:
                             if not used:
                                 continue
-                            if mod.projected:
+                            if afflictor.projected:
                                 continue
-                            if mod.item.group.name not in groupAttrMap:
+                            if afflictor.item.group.name not in groupAttrMap:
                                 continue
                             usesCap = True
                             try:
-                                if mod.capUse:
-                                    capUsed -= mod.capUse
+                                if afflictor.capUse:
+                                    capUsed -= afflictor.capUse
                                 else:
                                     usesCap = False
                             except AttributeError:
                                 usesCap = False
 
                             # Normal Repairers
-                            if usesCap and not mod.charge:
-                                cycleTime = mod.rawCycleTime
-                                amount = mod.getModifiedItemAttr(groupAttrMap[mod.item.group.name])
+                            if usesCap and not afflictor.charge:
+                                cycleTime = afflictor.rawCycleTime
+                                amount = afflictor.getModifiedItemAttr(groupAttrMap[afflictor.item.group.name])
                                 localAdjustment[tankType] -= amount / (cycleTime / 1000.0)
-                                repairers.append(mod)
+                                repairers.append(afflictor)
                             # Ancillary Armor reps etc
-                            elif usesCap and mod.charge:
-                                cycleTime = mod.rawCycleTime
-                                amount = mod.getModifiedItemAttr(groupAttrMap[mod.item.group.name])
-                                if mod.charge.name == "Nanite Repair Paste":
-                                    multiplier = mod.getModifiedItemAttr("chargedArmorDamageMultiplier") or 1
+                            elif usesCap and afflictor.charge:
+                                cycleTime = afflictor.rawCycleTime
+                                amount = afflictor.getModifiedItemAttr(groupAttrMap[afflictor.item.group.name])
+                                if afflictor.charge.name == "Nanite Repair Paste":
+                                    multiplier = afflictor.getModifiedItemAttr("chargedArmorDamageMultiplier") or 1
                                 else:
                                     multiplier = 1
                                 localAdjustment[tankType] -= amount * multiplier / (cycleTime / 1000.0)
-                                repairers.append(mod)
+                                repairers.append(afflictor)
                             # Ancillary Shield boosters etc
-                            elif not usesCap and mod.item.group.name in ("Ancillary Shield Booster", "Ancillary Remote Shield Booster"):
-                                cycleTime = mod.rawCycleTime
-                                amount = mod.getModifiedItemAttr(groupAttrMap[mod.item.group.name])
-                                if self.factorReload and mod.charge:
-                                    reloadtime = mod.reloadTime
+                            elif not usesCap and afflictor.item.group.name in ("Ancillary Shield Booster", "Ancillary Remote Shield Booster"):
+                                cycleTime = afflictor.rawCycleTime
+                                amount = afflictor.getModifiedItemAttr(groupAttrMap[afflictor.item.group.name])
+                                if self.factorReload and afflictor.charge:
+                                    reloadtime = afflictor.reloadTime
                                 else:
                                     reloadtime = 0.0
-                                offdutycycle = reloadtime / ((max(mod.numShots, 1) * cycleTime) + reloadtime)
+                                offdutycycle = reloadtime / ((max(afflictor.numShots, 1) * cycleTime) + reloadtime)
                                 localAdjustment[tankType] -= amount * offdutycycle / (cycleTime / 1000.0)
 
                 # Sort repairers by efficiency. We want to use the most efficient repairers first
@@ -1381,35 +1479,35 @@ class Fit(object):
                 # Most efficient first, as we sorted earlier.
                 # calculate how much the repper can rep stability & add to total
                 totalPeakRecharge = self.capRecharge
-                for mod in repairers:
+                for afflictor in repairers:
                     if capUsed > totalPeakRecharge:
                         break
 
-                    if self.factorReload and mod.charge:
-                        reloadtime = mod.reloadTime
+                    if self.factorReload and afflictor.charge:
+                        reloadtime = afflictor.reloadTime
                     else:
                         reloadtime = 0.0
 
-                    cycleTime = mod.rawCycleTime
-                    capPerSec = mod.capUse
+                    cycleTime = afflictor.rawCycleTime
+                    capPerSec = afflictor.capUse
 
                     if capPerSec is not None and cycleTime is not None:
                         # Check how much this repper can work
                         sustainability = min(1, (totalPeakRecharge - capUsed) / capPerSec)
-                        amount = mod.getModifiedItemAttr(groupAttrMap[mod.item.group.name])
+                        amount = afflictor.getModifiedItemAttr(groupAttrMap[afflictor.item.group.name])
                         # Add the sustainable amount
-                        if not mod.charge:
-                            localAdjustment[groupStoreMap[mod.item.group.name]] += sustainability * amount / (
+                        if not afflictor.charge:
+                            localAdjustment[groupStoreMap[afflictor.item.group.name]] += sustainability * amount / (
                                     cycleTime / 1000.0)
                         else:
-                            if mod.charge.name == "Nanite Repair Paste":
-                                multiplier = mod.getModifiedItemAttr("chargedArmorDamageMultiplier") or 1
+                            if afflictor.charge.name == "Nanite Repair Paste":
+                                multiplier = afflictor.getModifiedItemAttr("chargedArmorDamageMultiplier") or 1
                             else:
                                 multiplier = 1
-                            ondutycycle = (max(mod.numShots, 1) * cycleTime) / (
-                                    (max(mod.numShots, 1) * cycleTime) + reloadtime)
+                            ondutycycle = (max(afflictor.numShots, 1) * cycleTime) / (
+                                    (max(afflictor.numShots, 1) * cycleTime) + reloadtime)
                             localAdjustment[groupStoreMap[
-                                mod.item.group.name]] += sustainability * amount * ondutycycle * multiplier / (
+                                afflictor.item.group.name]] += sustainability * amount * ondutycycle * multiplier / (
                                     cycleTime / 1000.0)
 
                         capUsed += capPerSec
@@ -1450,8 +1548,8 @@ class Fit(object):
         weaponDps = DmgTypes(0, 0, 0, 0)
 
         for mod in self.modules:
-            weaponVolley += mod.getVolley(spoolOptions=spoolOptions, targetResists=self.targetResists)
-            weaponDps += mod.getDps(spoolOptions=spoolOptions, targetResists=self.targetResists)
+            weaponVolley += mod.getVolley(spoolOptions=spoolOptions, targetProfile=self.targetProfile)
+            weaponDps += mod.getDps(spoolOptions=spoolOptions, targetProfile=self.targetProfile)
 
         self.__weaponVolleyMap[spoolOptions] = weaponVolley
         self.__weaponDpsMap[spoolOptions] = weaponDps
@@ -1461,12 +1559,12 @@ class Fit(object):
         droneDps = DmgTypes(0, 0, 0, 0)
 
         for drone in self.drones:
-            droneVolley += drone.getVolley(targetResists=self.targetResists)
-            droneDps += drone.getDps(targetResists=self.targetResists)
+            droneVolley += drone.getVolley(targetProfile=self.targetProfile)
+            droneDps += drone.getDps(targetProfile=self.targetProfile)
 
         for fighter in self.fighters:
-            droneVolley += fighter.getVolley(targetResists=self.targetResists)
-            droneDps += fighter.getDps(targetResists=self.targetResists)
+            droneVolley += fighter.getVolley(targetProfile=self.targetProfile)
+            droneDps += fighter.getDps(targetProfile=self.targetProfile)
 
         self.__droneDps = droneDps
         self.__droneVolley = droneVolley
@@ -1479,20 +1577,67 @@ class Fit(object):
 
         return True
 
-    def __deepcopy__(self, memo=None):
-        copy_ship = Fit()
-        # Character and owner are not copied
-        copy_ship.character = self.__character
-        copy_ship.owner = self.owner
-        copy_ship.ship = deepcopy(self.ship)
-        copy_ship.name = "%s copy" % self.name
-        copy_ship.damagePattern = self.damagePattern
-        copy_ship.targetResists = self.targetResists
-        copy_ship.implantLocation = self.implantLocation
-        copy_ship.notes = self.notes
+    def getReleaseLimitForDrone(self, item):
+        if not item.isDrone:
+            return 0
+        bw = round(self.ship.getModifiedItemAttr("droneBandwidth"))
+        volume = round(item.attribsWithOverrides['volume'].value)
+        return int(bw / volume)
 
+    def getStoreLimitForDrone(self, item):
+        if not item.isDrone:
+            return 0
+        bayTotal = round(self.ship.getModifiedItemAttr("droneCapacity"))
+        bayUsed = round(self.droneBayUsed)
+        volume = item.attribsWithOverrides['volume'].value
+        return int((bayTotal - bayUsed) / volume)
+
+    def getSystemSecurity(self):
+        secstatus = self.systemSecurity
+        # Default to nullsec
+        if secstatus is None:
+            secstatus = FitSystemSecurity.NULLSEC
+        return secstatus
+
+
+    def activeModulesIter(self):
+        for mod in self.modules:
+            if mod.state >= FittingModuleState.ACTIVE:
+                yield mod
+
+    def activeDronesIter(self):
+        for drone in self.drones:
+            if drone.amountActive > 0:
+                yield drone
+
+    def activeFightersIter(self):
+        for fighter in self.fighters:
+            if fighter.active:
+                yield fighter
+
+    def activeFighterAbilityIter(self):
+        for fighter in self.activeFightersIter():
+            for ability in fighter.abilities:
+                if ability.active:
+                    yield fighter, ability
+
+    def __deepcopy__(self, memo=None):
+        fitCopy = Fit()
+        # Character and owner are not copied
+        fitCopy.character = self.__character
+        fitCopy.owner = self.owner
+        fitCopy.ship = deepcopy(self.ship)
+        fitCopy.mode = deepcopy(self.mode)
+        fitCopy.name = "%s copy" % self.name
+        fitCopy.damagePattern = self.damagePattern
+        fitCopy.targetProfile = self.targetProfile
+        fitCopy.implantLocation = self.implantLocation
+        fitCopy.systemSecurity = self.systemSecurity
+        fitCopy.notes = self.notes
+
+        for i in self.modules:
+            fitCopy.modules.appendIgnoreEmpty(deepcopy(i))
         toCopy = (
-            "modules",
             "drones",
             "fighters",
             "cargo",
@@ -1503,7 +1648,7 @@ class Fit(object):
             "projectedFighters")
         for name in toCopy:
             orig = getattr(self, name)
-            c = getattr(copy_ship, name)
+            c = getattr(fitCopy, name)
             for i in orig:
                 c.append(deepcopy(i))
 
@@ -1513,22 +1658,22 @@ class Fit(object):
             eos.db.saveddata_session.refresh(fit)
 
         for fit in self.commandFits:
-            copy_ship.commandFitDict[fit.ID] = fit
+            fitCopy.commandFitDict[fit.ID] = fit
             forceUpdateSavedata(fit)
-            copyCommandInfo = fit.getCommandInfo(copy_ship.ID)
+            copyCommandInfo = fit.getCommandInfo(fitCopy.ID)
             originalCommandInfo = fit.getCommandInfo(self.ID)
             copyCommandInfo.active = originalCommandInfo.active
             forceUpdateSavedata(fit)
 
         for fit in self.projectedFits:
-            copy_ship.projectedFitDict[fit.ID] = fit
+            fitCopy.projectedFitDict[fit.ID] = fit
             forceUpdateSavedata(fit)
-            copyProjectionInfo = fit.getProjectionInfo(copy_ship.ID)
+            copyProjectionInfo = fit.getProjectionInfo(fitCopy.ID)
             originalProjectionInfo = fit.getProjectionInfo(self.ID)
             copyProjectionInfo.active = originalProjectionInfo.active
             forceUpdateSavedata(fit)
 
-        return copy_ship
+        return fitCopy
 
     def __repr__(self):
         return "Fit(ID={}, ship={}, name={}) at {}".format(

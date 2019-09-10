@@ -9,22 +9,19 @@ import config
 import webbrowser
 
 import eos.db
-from eos.enum import Enum
+from service.const import EsiLoginMethod, EsiSsoMode
 from eos.saveddata.ssocharacter import SsoCharacter
-from service.esiAccess import APIException, SsoMode
+from service.esiAccess import APIException
 import gui.globalEvents as GE
+from gui.ssoLogin import SsoLogin, SsoLoginServer
 from service.server import StoppableHTTPServer, AuthHandler
 from service.settings import EsiSettings
 from service.esiAccess import EsiAccess
+import gui.mainFrame
 
 from requests import Session
 
 pyfalog = Logger(__name__)
-
-
-class LoginMethod(Enum):
-    SERVER = 0
-    MANUAL = 1
 
 
 class Esi(EsiAccess):
@@ -104,19 +101,20 @@ class Esi(EsiAccess):
         self.fittings_deleted.add(fittingID)
 
     def login(self):
-        serverAddr = None
         # always start the local server if user is using client details. Otherwise, start only if they choose to do so.
-        if self.settings.get('ssoMode') == SsoMode.CUSTOM or self.settings.get('loginMode') == LoginMethod.SERVER:
-            # random port, or if it's custom application, use a defined port
-            serverAddr = self.startServer(6461 if self.settings.get('ssoMode') == SsoMode.CUSTOM else 0)
-        uri = self.getLoginURI(serverAddr)
-        webbrowser.open(uri)
-        wx.PostEvent(self.mainFrame, GE.SsoLoggingIn(sso_mode=self.settings.get('ssoMode'), login_mode=self.settings.get('loginMode')))
+        if self.settings.get('ssoMode') == EsiSsoMode.CUSTOM or self.settings.get('loginMode') == EsiLoginMethod.SERVER:
+            with gui.ssoLogin.SsoLoginServer(6461 if self.settings.get('ssoMode') == EsiSsoMode.CUSTOM else 0) as dlg:
+                dlg.ShowModal()
+        else:
+            with gui.ssoLogin.SsoLogin() as dlg:
+                if dlg.ShowModal() == wx.ID_OK:
+                    self.handleLogin({'SSOInfo': [dlg.ssoInfoCtrl.Value.strip()]})
 
     def stopServer(self):
         pyfalog.debug("Stopping Server")
-        self.httpd.stop()
-        self.httpd = None
+        if self.httpd:
+            self.httpd.stop()
+            self.httpd = None
 
     def startServer(self, port):  # todo: break this out into two functions: starting the server, and getting the URI
         pyfalog.debug("Starting server")
@@ -138,7 +136,7 @@ class Esi(EsiAccess):
     def handleLogin(self, message):
 
         # we already have authenticated stuff for the auto mode
-        if self.settings.get('ssoMode') == SsoMode.AUTO:
+        if self.settings.get('ssoMode') == EsiSsoMode.AUTO:
             ssoInfo = message['SSOInfo'][0]
             auth_response = json.loads(base64.b64decode(ssoInfo))
         else:
@@ -156,7 +154,6 @@ class Esi(EsiAccess):
                 res.json()
             )
         cdata = res.json()
-        print(cdata)
 
         currentCharacter = self.getSsoCharacter(cdata['CharacterName'])
 

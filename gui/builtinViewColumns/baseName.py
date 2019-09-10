@@ -21,41 +21,55 @@
 # noinspection PyPackageRequirements
 import wx
 from logbook import Logger
+
+import gui.mainFrame
+from eos.const import FittingSlot
 from eos.saveddata.cargo import Cargo
-from eos.saveddata.implant import Implant
 from eos.saveddata.drone import Drone
 from eos.saveddata.fighter import Fighter
-from eos.saveddata.module import Module, Slot, Rack
-from eos.saveddata.fit import Fit
+from eos.saveddata.fit import Fit, FitLite
+from eos.saveddata.implant import Implant
+from eos.saveddata.module import Module, Rack
+from eos.saveddata.targetProfile import TargetProfile
+from graphs.wrapper import BaseWrapper
+from gui.builtinContextMenus.envEffectAdd import AddEnvironmentEffect
+from gui.utils.numberFormatter import formatAmount
+from gui.viewColumn import ViewColumn
 from service.fit import Fit as FitSvc
 from service.market import Market
-from gui.viewColumn import ViewColumn
-from gui.builtinContextMenus.whProjector import WhProjector
-import gui.mainFrame
+
 
 pyfalog = Logger(__name__)
 
 
 class BaseName(ViewColumn):
+
     name = "Base Name"
+    proportionWidth = 7
 
     def __init__(self, fittingView, params):
         ViewColumn.__init__(self, fittingView)
 
         self.mainFrame = gui.mainFrame.MainFrame.getInstance()
         self.columnText = "Name"
-        self.shipImage = fittingView.imageList.GetImageIndex("ship_small", "gui")
         self.mask = wx.LIST_MASK_TEXT
         self.projectedView = isinstance(fittingView, gui.builtinAdditionPanes.projectedView.ProjectedView)
 
     def getText(self, stuff):
+        if isinstance(stuff, BaseWrapper):
+            stuff = stuff.item
+
         if isinstance(stuff, Drone):
             return "%dx %s" % (stuff.amount, stuff.item.name)
         elif isinstance(stuff, Fighter):
             return "%d/%d %s" % \
-                   (stuff.amountActive, stuff.getModifiedItemAttr("fighterSquadronMaxSize"), stuff.item.name)
+                   (stuff.amount, stuff.getModifiedItemAttr("fighterSquadronMaxSize"), stuff.item.name)
         elif isinstance(stuff, Cargo):
-            return "%dx %s" % (stuff.amount, stuff.item.name)
+            if stuff.item.group.name in ("Cargo Container", "Secure Cargo Container", "Audit Log Secure Container", "Freight Container"):
+                capacity = stuff.item.getAttribute('capacity')
+                if capacity:
+                    return "{:d}x {} ({} m\u00B3)".format(stuff.amount, stuff.item.name, formatAmount(capacity, 3, 0, 6))
+            return "{:d}x {}".format(stuff.amount, stuff.item.name)
         elif isinstance(stuff, Fit):
             if self.projectedView:
                 # we need a little more information for the projected view
@@ -70,30 +84,34 @@ class BaseName(ViewColumn):
                 return "<unknown>"
             else:
                 return "%s (%s)" % (stuff.name, stuff.ship.item.name)
+        elif isinstance(stuff, FitLite):
+            return "{} ({})".format(stuff.name, stuff.shipName)
         elif isinstance(stuff, Rack):
             if FitSvc.getInstance().serviceFittingOptions["rackLabels"]:
-                if stuff.slot == Slot.MODE:
+                if stuff.slot == FittingSlot.MODE:
                     return '─ Tactical Mode ─'
                 else:
-                    return '─ {} {} Slot{}─'.format(stuff.num, Slot.getName(stuff.slot).capitalize(), '' if stuff.num == 1 else 's')
+                    return '─ {} {} Slot{}─'.format(stuff.num, FittingSlot(stuff.slot).name.capitalize(), '' if stuff.num == 1 else 's')
             else:
                 return ""
         elif isinstance(stuff, Module):
             if self.projectedView:
                 # check for projected abyssal name
                 name_check = stuff.item.name[0:-2]
-                type = WhProjector.abyssal_mapping.get(name_check, None)
+                type = AddEnvironmentEffect.abyssal_mapping.get(name_check, None)
                 if type:
                     sMkt = Market.getInstance()
                     type = sMkt.getItem(type)
                     return "{} {}".format(type.name, stuff.item.name[-1:])
 
             if stuff.isEmpty:
-                return "%s Slot" % Slot.getName(stuff.slot).capitalize()
+                return "%s Slot" % FittingSlot(stuff.slot).name.capitalize()
             else:
                 return stuff.item.name
         elif isinstance(stuff, Implant):
             return stuff.item.name
+        elif isinstance(stuff, TargetProfile):
+            return stuff.name
         else:
             item = getattr(stuff, "item", stuff)
 

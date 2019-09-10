@@ -23,13 +23,15 @@ import json
 
 from logbook import Logger
 
+from eos.const import FittingModuleState, FittingSlot
 from eos.saveddata.cargo import Cargo
 from eos.saveddata.citadel import Citadel
 from eos.saveddata.drone import Drone
 from eos.saveddata.fighter import Fighter
 from eos.saveddata.fit import Fit
-from eos.saveddata.module import Module, State, Slot
+from eos.saveddata.module import Module
 from eos.saveddata.ship import Ship
+from gui.fitCommands.helpers import activeStateLimit
 from service.fit import Fit as svcFit
 from service.market import Market
 
@@ -41,12 +43,12 @@ class ESIExportException(Exception):
 pyfalog = Logger(__name__)
 
 INV_FLAGS = {
-    Slot.LOW: 11,
-    Slot.MED: 19,
-    Slot.HIGH: 27,
-    Slot.RIG: 92,
-    Slot.SUBSYSTEM: 125,
-    Slot.SERVICE: 164
+    FittingSlot.LOW: 11,
+    FittingSlot.MED: 19,
+    FittingSlot.HIGH: 27,
+    FittingSlot.RIG: 92,
+    FittingSlot.SUBSYSTEM: 125,
+    FittingSlot.SERVICE: 164
 }
 
 INV_FLAG_CARGOBAY = 5
@@ -54,7 +56,7 @@ INV_FLAG_DRONEBAY = 87
 INV_FLAG_FIGHTER = 158
 
 
-def exportESI(ofit):
+def exportESI(ofit, callback):
     # A few notes:
     # max fit name length is 50 characters
     # Most keys are created simply because they are required, but bogus data is okay
@@ -82,7 +84,7 @@ def exportESI(ofit):
         item = nested_dict()
         slot = module.slot
 
-        if slot == Slot.SUBSYSTEM:
+        if slot == FittingSlot.SUBSYSTEM:
             # Order of subsystem matters based on this attr. See GH issue #130
             slot = int(module.getModifiedItemAttr("subSystemSlot"))
             item['flag'] = slot
@@ -127,14 +129,19 @@ def exportESI(ofit):
     for fighter in ofit.fighters:
         item = nested_dict()
         item['flag'] = INV_FLAG_FIGHTER
-        item['quantity'] = fighter.amountActive
+        item['quantity'] = fighter.amount
         item['type_id'] = fighter.item.ID
         fit['items'].append(item)
 
     if len(fit['items']) == 0:
         raise ESIExportException("Cannot export fitting: module list cannot be empty.")
 
-    return json.dumps(fit)
+    text = json.dumps(fit)
+
+    if callback:
+        callback(text)
+    else:
+        return text
 
 
 def importESI(string):
@@ -189,8 +196,8 @@ def importESI(string):
                     if m.fits(fitobj):
                         fitobj.modules.append(m)
                 else:
-                    if m.isValidState(State.ACTIVE):
-                        m.state = State.ACTIVE
+                    if m.isValidState(FittingModuleState.ACTIVE):
+                        m.state = activeStateLimit(m.item)
 
                     moduleList.append(m)
 
@@ -199,7 +206,9 @@ def importESI(string):
             continue
 
     # Recalc to get slot numbers correct for T3 cruisers
-    svcFit.getInstance().recalc(fitobj)
+    sFit = svcFit.getInstance()
+    sFit.recalc(fitobj)
+    sFit.fill(fitobj)
 
     for module in moduleList:
         if module.fits(fitobj):

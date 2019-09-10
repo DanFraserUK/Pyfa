@@ -17,17 +17,21 @@
 # along with pyfa.  If not, see <http://www.gnu.org/licenses/>.
 # =============================================================================
 
+
+import traceback
+
 # noinspection PyPackageRequirements
 import wx
-from gui.bitmap_loader import BitmapLoader
-
 from logbook import Logger
 
+import config
 import gui.globalEvents as GE
 import gui.mainFrame
+from gui.bitmap_loader import BitmapLoader
+from gui.utils.clipboard import toClipboard
 from service.character import Character
 from service.fit import Fit
-from gui.utils.clipboard import toClipboard
+
 
 pyfalog = Logger(__name__)
 
@@ -159,9 +163,11 @@ class CharacterSelection(wx.Panel):
         if e is None:
             self.refreshCharacterList()
         else:
-            exc_type, exc_obj, exc_trace = e
-            pyfalog.warn("Error fetching skill information for character")
-            pyfalog.warn(exc_obj)
+            pyfalog.warn("Error fetching skill information for character for refreshAPICallback")
+            exc_type, exc_value, exc_trace = e
+            if config.debug:
+                exc_value = ''.join(traceback.format_exception(exc_type, exc_value, exc_trace))
+            pyfalog.warn(exc_value)
 
             wx.MessageBox(
                 "Error fetching skill information",
@@ -174,7 +180,7 @@ class CharacterSelection(wx.Panel):
         if charID == -1:
             # revert to previous character
             self.charChoice.SetSelection(self.charCache)
-            self.mainFrame.showCharacterEditor(event)
+            self.mainFrame.OnShowCharacterEditor(event)
             return
 
         self.toggleRefreshButton()
@@ -182,7 +188,7 @@ class CharacterSelection(wx.Panel):
         sFit = Fit.getInstance()
         sFit.changeChar(fitID, charID)
         self.charCache = self.charChoice.GetCurrentSelection()
-        wx.PostEvent(self.mainFrame, GE.FitChanged(fitID=fitID))
+        wx.PostEvent(self.mainFrame, GE.FitChanged(fitIDs=(fitID,)))
 
     def toggleRefreshButton(self):
         charID = self.getActiveCharacter()
@@ -208,14 +214,18 @@ class CharacterSelection(wx.Panel):
         """
         When fit is changed, or new fit is selected
         """
-        self.charChoice.Enable(event.fitID is not None)
+        event.Skip()
+        activeFitID = self.mainFrame.getActiveFit()
+        if activeFitID is not None and activeFitID not in event.fitIDs:
+            return
+        self.charChoice.Enable(activeFitID is not None)
         choice = self.charChoice
         sFit = Fit.getInstance()
         currCharID = choice.GetClientData(choice.GetCurrentSelection())
-        fit = sFit.getFit(event.fitID)
+        fit = sFit.getFit(activeFitID)
         newCharID = fit.character.ID if fit is not None else None
 
-        if event.fitID is None:
+        if activeFitID is None:
             self.skillReqsStaticBitmap.SetBitmap(self.cleanSkills)
             self.skillReqsStaticBitmap.SetToolTip("No active fit")
         else:
@@ -250,8 +260,6 @@ class CharacterSelection(wx.Panel):
                 self.charChanged(None)
 
         self.toggleRefreshButton()
-
-        event.Skip()
 
     def exportSkills(self, evt):
         skillsMap = self._buildSkillsTooltipCondensed(self.reqs, skillsMap={})

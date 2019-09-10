@@ -2,6 +2,7 @@ import threading
 import time
 # noinspection PyPackageRequirements
 import wx
+from service.const import PortEftOptions
 from service.settings import HTMLExportSettings
 from service.fit import Fit
 from service.port import Port
@@ -12,7 +13,7 @@ from eos.db import getFit
 pyfalog = Logger(__name__)
 
 
-class exportHtml(object):
+class exportHtml:
     _instance = None
 
     @classmethod
@@ -67,7 +68,7 @@ class exportHtmlThread(threading.Thread):
             FILE.write(HTML)
             FILE.close()
         except IOError as ex:
-            print(("Failed to write to " + settings.getPath()))
+            pyfalog.warning("Failed to write to " + settings.getPath())
             pass
         except Exception as ex:
             pass
@@ -208,8 +209,10 @@ class exportHtmlThread(threading.Thread):
                         if self.stopRunning:
                             return
                         try:
-                            eftFit = Port.exportEft(getFit(fit[0]))
-                            print(eftFit)
+                            eftFit = Port.exportEft(getFit(fit[0]), options={
+                                PortEftOptions.IMPLANTS: True,
+                                PortEftOptions.MUTATIONS: True,
+                                PortEftOptions.LOADED_CHARGES: True})
 
                             HTMLfit = (
                                     '           <li data-role="collapsible" data-iconpos="right" data-shadow="false" '

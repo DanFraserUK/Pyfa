@@ -26,7 +26,7 @@ import gui.mainFrame
 from gui.chrome_tabs import EVT_NOTEBOOK_PAGE_CHANGED
 from gui.utils import fonts
 
-from eos.saveddata.module import Hardpoint
+from eos.const import FittingHardpoint
 
 from gui.utils.numberFormatter import formatAmount
 
@@ -49,6 +49,7 @@ class ResourcesViewFull(StatsView):
             self.toggleContext("fighter")
         else:
             self.toggleContext("drone")
+        event.Skip()
 
     def toggleContext(self, context):
         # Apparently you cannot .Hide(True) on a Window, otherwise I would just .Hide(context !== x).
@@ -196,14 +197,14 @@ class ResourcesViewFull(StatsView):
         # If we did anything intresting, we'd update our labels to reflect the new fit's stats here
 
         stats = (
-            ("label%sUsedTurretHardpoints", lambda: fit.getHardpointsUsed(Hardpoint.TURRET), 0, 0, 0),
+            ("label%sUsedTurretHardpoints", lambda: fit.getHardpointsUsed(FittingHardpoint.TURRET), 0, 0, 0),
             ("label%sTotalTurretHardpoints", lambda: fit.ship.getModifiedItemAttr('turretSlotsLeft'), 0, 0, 0),
-            ("label%sUsedLauncherHardpoints", lambda: fit.getHardpointsUsed(Hardpoint.MISSILE), 0, 0, 0),
+            ("label%sUsedLauncherHardpoints", lambda: fit.getHardpointsUsed(FittingHardpoint.MISSILE), 0, 0, 0),
             ("label%sTotalLauncherHardpoints", lambda: fit.ship.getModifiedItemAttr('launcherSlotsLeft'), 0, 0, 0),
             ("label%sUsedDronesActive", lambda: fit.activeDrones, 0, 0, 0),
             ("label%sTotalDronesActive", lambda: fit.extraAttributes["maxActiveDrones"], 0, 0, 0),
             ("label%sUsedFighterTubes", lambda: fit.fighterTubesUsed, 3, 0, 9),
-            ("label%sTotalFighterTubes", lambda: fit.ship.getModifiedItemAttr("fighterTubes"), 3, 0, 9),
+            ("label%sTotalFighterTubes", lambda: fit.fighterTubesTotal, 3, 0, 9),
             ("label%sUsedCalibrationPoints", lambda: fit.calibrationUsed, 0, 0, 0),
             ("label%sTotalCalibrationPoints", lambda: fit.ship.getModifiedItemAttr('upgradeCapacity'), 0, 0, 0),
             ("label%sUsedPg", lambda: fit.pgUsed, 4, 0, 9),
@@ -284,6 +285,8 @@ class ResourcesViewFull(StatsView):
             else:
                 label.SetLabel(formatAmount(value, prec, lowest, highest))
                 label.SetToolTip(wx.ToolTip("%.1f" % value))
+            # See issue #1877
+            label.InvalidateBestSize()
 
         colorWarn = wx.Colour(204, 51, 51)
         colorNormal = wx.SystemSettings.GetColour(wx.SYS_COLOUR_WINDOWTEXT)

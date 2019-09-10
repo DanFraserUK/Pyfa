@@ -37,7 +37,8 @@ from service.esi import Esi
 
 from eos.saveddata.implant import Implant as es_Implant
 from eos.saveddata.character import Character as es_Character, Skill
-from eos.saveddata.module import Slot as es_Slot, Module as es_Module
+from eos.saveddata.module import Module as es_Module
+from eos.const import FittingSlot as es_Slot
 from eos.saveddata.fighter import Fighter as es_Fighter
 
 pyfalog = Logger(__name__)
@@ -121,7 +122,7 @@ class SkillBackupThread(threading.Thread):
         wx.CallAfter(self.callback)
 
 
-class Character(object):
+class Character:
     instance = None
     skillReqsDict = {}
 
@@ -410,6 +411,7 @@ class Character(object):
             return
 
         implant = es_Implant(eos.db.getItem(itemID))
+        char.implants.makeRoom(implant)
         char.implants.append(implant)
         eos.db.commit()
 
@@ -427,7 +429,7 @@ class Character(object):
     def checkRequirements(self, fit):
         # toCheck = []
         reqs = {}
-        for thing in itertools.chain(fit.modules, fit.drones, fit.fighters, (fit.ship,)):
+        for thing in itertools.chain(fit.modules, fit.drones, fit.fighters, (fit.ship,), fit.appliedImplants, fit.boosters):
             if isinstance(thing, es_Module) and thing.slot == es_Slot.RIG:
                 continue
             for attr in ("item", "charge"):

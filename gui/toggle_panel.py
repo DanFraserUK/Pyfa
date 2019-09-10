@@ -15,7 +15,7 @@
 import wx
 
 
-class TogglePanel (wx.Panel):
+class TogglePanel(wx.Panel):
     def __init__(self, parent, force_layout=False, *args, **kargs):
         super().__init__(parent, *args, **kargs)
 
@@ -49,7 +49,7 @@ class TogglePanel (wx.Panel):
 
         # Add a sizer for additional header items if we need it
         self.hcontent_sizer = wx.BoxSizer(wx.HORIZONTAL)
-        header_sizer.Add(self.hcontent_sizer, 0, wx.RIGHT, 5)
+        header_sizer.Add(self.hcontent_sizer, 1, wx.RIGHT, 5)
 
         # Create the content panel, set sizer, and add to main sizer
         self.content_panel = wx.Panel(self)
@@ -141,61 +141,3 @@ class TogglePanel (wx.Panel):
             self.parent.Layout()
         else:
             self.OnStateChange(self.GetBestSize())
-
-
-if __name__ == "__main__":
-
-    from wx.lib.inspection import InspectionTool
-
-    class MainPanel(wx.Panel):
-        def __init__(self, parent):
-            super().__init__(parent, size=(-1, -1))
-
-            if 'wxMSW' in wx.PlatformInfo:
-                color = wx.SystemSettings.GetColour(wx.SYS_COLOUR_BTNFACE)
-                self.SetBackgroundColour(color)
-
-            main_sizer = wx.BoxSizer(wx.VERTICAL)
-
-            # Generate 3 test panels with different font sizes
-            for x in range(3):
-                toggle_panel = TogglePanel(self)
-                toggle_panel.SetLabel("Test Header")
-
-                content_panel = toggle_panel.GetContentPanel()
-                content_panel.SetBackgroundColour(wx.WHITE)
-
-                content_sizer = wx.BoxSizer(wx.HORIZONTAL)
-                header = wx.StaticText(content_panel, -1, "TogglePanel Test")
-                header.SetFont(wx.Font(10 + (x * 3), wx.SWISS, wx.NORMAL, wx.BOLD))
-                content_sizer.Add(header, 0, wx.ALL, 10)
-                content_panel.SetSizer(content_sizer)
-
-                main_sizer.Add(toggle_panel, 0, wx.EXPAND | wx.ALL, 2)
-
-            self.SetSizer(main_sizer)
-
-    class Frame(wx.Frame):
-        def __init__(self, title):
-            super().__init__(None, title=title, size=(500, 500))
-            main_sizer = wx.BoxSizer(wx.VERTICAL)
-
-            self.statsPane = MainPanel(self)
-            main_sizer.Add(self.statsPane, 0, wx.EXPAND)
-
-            self.SetSizerAndFit(main_sizer)
-
-            if not InspectionTool().initialized:
-                InspectionTool().Init()
-
-            # Find a widget to be selected in the tree.  Use either the
-            # one under the cursor, if any, or this frame.
-            wnd, _ = wx.FindWindowAtPointer()
-            if not wnd:
-                wnd = self
-            InspectionTool().Show(wnd, True)
-
-    app = wx.App(redirect=False)   # Error messages go to popup window
-    top = Frame("Test Toggle Panel")
-    top.Show()
-    app.MainLoop()

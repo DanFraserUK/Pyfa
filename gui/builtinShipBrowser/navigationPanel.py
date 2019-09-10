@@ -8,9 +8,12 @@ import gui.mainFrame
 import gui.utils.color as colorUtils
 import gui.utils.draw as drawUtils
 import gui.utils.fonts as fonts
-from .events import FitSelected, SearchSelected, ImportSelected, Stage1Selected, Stage2Selected, Stage3Selected
 from gui.bitmap_loader import BitmapLoader
+from gui.utils.helpers_wxPython import HandleCtrlBackspace
 from service.fit import Fit
+from utils.cjk import isStringCjk
+from .events import FitSelected, SearchSelected, ImportSelected, Stage1Selected, Stage2Selected, Stage3Selected
+
 
 pyfalog = Logger(__name__)
 
@@ -72,7 +75,7 @@ class NavigationPanel(SFItem.SFBrowserItem):
 
         # self.BrowserSearchBox.Bind(wx.EVT_TEXT_ENTER, self.OnBrowserSearchBoxEnter)
         # self.BrowserSearchBox.Bind(wx.EVT_KILL_FOCUS, self.OnBrowserSearchBoxLostFocus)
-        self.BrowserSearchBox.Bind(wx.EVT_KEY_DOWN, self.OnBrowserSearchBoxEsc)
+        self.BrowserSearchBox.Bind(wx.EVT_KEY_DOWN, self.OnBrowserSearchBoxKeyPress)
         self.BrowserSearchBox.Bind(wx.EVT_TEXT, self.OnScheduleSearch)
 
         self.SetMinSize(size)
@@ -85,7 +88,8 @@ class NavigationPanel(SFItem.SFBrowserItem):
         search = self.BrowserSearchBox.GetValue()
         # Make sure we do not count wildcard as search symbol
         realsearch = search.replace("*", "")
-        if len(realsearch) >= 3:
+        minChars = 1 if isStringCjk(realsearch) else 3
+        if len(realsearch) >= minChars:
             self.lastSearch = search
             wx.PostEvent(self.shipBrowser, SearchSelected(text=search, back=False))
 
@@ -103,9 +107,13 @@ class NavigationPanel(SFItem.SFBrowserItem):
     def OnBrowserSearchBoxLostFocus(self, event):
         self.BrowserSearchBox.Show(False)
 
-    def OnBrowserSearchBoxEsc(self, event):
-        if event.GetKeyCode() == wx.WXK_ESCAPE:
+    def OnBrowserSearchBoxKeyPress(self, event):
+        keycode = event.GetKeyCode()
+        mstate = wx.GetMouseState()
+        if keycode == wx.WXK_ESCAPE and mstate.GetModifiers() == wx.MOD_NONE:
             self.BrowserSearchBox.Show(False)
+        elif event.RawControlDown() and event.GetKeyCode() == wx.WXK_BACK:
+            HandleCtrlBackspace(self.BrowserSearchBox)
         else:
             event.Skip()
 

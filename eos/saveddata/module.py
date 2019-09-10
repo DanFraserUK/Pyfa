@@ -17,83 +17,46 @@
 # along with eos.  If not, see <http://www.gnu.org/licenses/>.
 # ===============================================================================
 
-from math import floor
-
 from logbook import Logger
+import math
 from sqlalchemy.orm import reconstructor, validates
 
 import eos.db
+from eos.const import FittingHardpoint, FittingModuleState, FittingSlot
 from eos.effectHandlerHelpers import HandledCharge, HandledItem
-from eos.enum import Enum
 from eos.modifiedAttributeDict import ChargeAttrShortcut, ItemAttrShortcut, ModifiedAttributeDict
 from eos.saveddata.citadel import Citadel
 from eos.saveddata.mutator import Mutator
+from eos.utils.cycles import CycleInfo, CycleSequence
 from eos.utils.float import floatUnerr
 from eos.utils.spoolSupport import calculateSpoolup, resolveSpoolOptions
-from eos.utils.stats import DmgTypes
+from eos.utils.stats import DmgTypes, RRTypes
+
 
 pyfalog = Logger(__name__)
 
-
-class State(Enum):
-    OFFLINE = -1
-    ONLINE = 0
-    ACTIVE = 1
-    OVERHEATED = 2
-
-
-class Slot(Enum):
-    # These are self-explanatory
-    LOW = 1
-    MED = 2
-    HIGH = 3
-    RIG = 4
-    SUBSYSTEM = 5
-    # not a real slot, need for pyfa display rack separation
-    MODE = 6
-    # system effects. They are projected "modules" and pyfa assumes all modules
-    # have a slot. In this case, make one up.
-    SYSTEM = 7
-    # used for citadel services
-    SERVICE = 8
-    # fighter 'slots'. Just easier to put them here...
-    F_LIGHT = 10
-    F_SUPPORT = 11
-    F_HEAVY = 12
-    # fighter 'slots' (for structures)
-    FS_LIGHT = 13
-    FS_SUPPORT = 14
-    FS_HEAVY = 15
-
-
 ProjectedMap = {
-    State.OVERHEATED: State.ACTIVE,
-    State.ACTIVE: State.OFFLINE,
-    State.OFFLINE: State.ACTIVE,
-    State.ONLINE: State.ACTIVE  # Just in case
+    FittingModuleState.OVERHEATED: FittingModuleState.ACTIVE,
+    FittingModuleState.ACTIVE: FittingModuleState.OFFLINE,
+    FittingModuleState.OFFLINE: FittingModuleState.ACTIVE,
+    FittingModuleState.ONLINE: FittingModuleState.ACTIVE  # Just in case
 }
 
 
 # Old state : New State
 LocalMap = {
-    State.OVERHEATED: State.ACTIVE,
-    State.ACTIVE: State.ONLINE,
-    State.OFFLINE: State.ONLINE,
-    State.ONLINE: State.ACTIVE
+    FittingModuleState.OVERHEATED: FittingModuleState.ACTIVE,
+    FittingModuleState.ACTIVE: FittingModuleState.ONLINE,
+    FittingModuleState.OFFLINE: FittingModuleState.ONLINE,
+    FittingModuleState.ONLINE: FittingModuleState.ACTIVE
 }
 
 
 # For system effects. They should only ever be online or offline
 ProjectedSystem = {
-    State.OFFLINE: State.ONLINE,
-    State.ONLINE: State.OFFLINE
+    FittingModuleState.OFFLINE: FittingModuleState.ONLINE,
+    FittingModuleState.ONLINE: FittingModuleState.OFFLINE
 }
-
-
-class Hardpoint(Enum):
-    NONE = 0
-    MISSILE = 1
-    TURRET = 2
 
 
 class Module(HandledItem, HandledCharge, ItemAttrShortcut, ChargeAttrShortcut):
@@ -127,7 +90,7 @@ class Module(HandledItem, HandledCharge, ItemAttrShortcut, ChargeAttrShortcut):
         self.__charge = None
 
         self.projected = False
-        self.state = State.ONLINE
+        self.state = FittingModuleState.ONLINE
         self.build()
 
     @reconstructor
@@ -171,12 +134,12 @@ class Module(HandledItem, HandledCharge, ItemAttrShortcut, ChargeAttrShortcut):
             self.__charge = None
 
         self.__baseVolley = None
-        self.__baseRemoteReps = None
+        self.__baseRRAmount = None
         self.__miningyield = None
         self.__reloadTime = None
         self.__reloadForce = None
         self.__chargeCycles = None
-        self.__hardpoint = Hardpoint.NONE
+        self.__hardpoint = FittingHardpoint.NONE
         self.__itemModifiedAttributes = ModifiedAttributeDict(parent=self)
         self.__chargeModifiedAttributes = ModifiedAttributeDict(parent=self)
         self.__slot = self.dummySlot  # defaults to None
@@ -185,7 +148,7 @@ class Module(HandledItem, HandledCharge, ItemAttrShortcut, ChargeAttrShortcut):
             self.__itemModifiedAttributes.original = self.__item.attributes
             self.__itemModifiedAttributes.overrides = self.__item.overrides
             self.__hardpoint = self.__calculateHardpoint(self.__item)
-            self.__slot = self.__calculateSlot(self.__item)
+            self.__slot = self.calculateSlot(self.__item)
 
             # Instantiate / remove mutators if this is a mutated module
             if self.__baseItem:
@@ -230,21 +193,25 @@ class Module(HandledItem, HandledCharge, ItemAttrShortcut, ChargeAttrShortcut):
         # todo: validate baseItem as well if it's set.
         if self.isEmpty:
             return False
-        return self.__item is None or \
-               (self.__item.category.name not in ("Module", "Subsystem", "Structure Module") and
-                self.__item.group.name not in self.SYSTEM_GROUPS) or \
-               (self.item.isAbyssal and (not self.baseItemID or not self.mutaplasmidID))
+        return (
+            self.__item is None or (
+                self.__item.category.name not in ("Module", "Subsystem", "Structure Module") and
+                self.__item.group.name not in self.SYSTEM_GROUPS) or
+            (self.item.isAbyssal and not self.isMutated))
 
     @property
     def isMutated(self):
-        return self.baseItemID or self.mutaplasmidID
+        return self.baseItemID and self.mutaplasmidID
 
     @property
     def numCharges(self):
-        if self.charge is None:
+        return self.getNumCharges(self.charge)
+
+    def getNumCharges(self, charge):
+        if charge is None:
             charges = 0
         else:
-            chargeVolume = self.charge.volume
+            chargeVolume = charge.volume
             containerCapacity = self.item.capacity
             if chargeVolume is None or containerCapacity is None:
                 charges = 0
@@ -273,8 +240,19 @@ class Module(HandledItem, HandledCharge, ItemAttrShortcut, ChargeAttrShortcut):
 
     @property
     def modPosition(self):
-        if self.owner:
-            return self.owner.modules.index(self) if not self.isProjected else self.owner.projectedModules.index(self)
+        return self.getModPosition()
+
+    def getModPosition(self, fit=None):
+        # Pass in fit for reliability. When it's not passed, we rely on owner and owner
+        # is set by sqlalchemy during flush
+        fit = fit if fit is not None else self.owner
+        if fit:
+            container = fit.projectedModules if self.isProjected else fit.modules
+            try:
+                return container.index(self)
+            except ValueError:
+                return None
+        return None
 
     @property
     def isProjected(self):
@@ -310,7 +288,7 @@ class Module(HandledItem, HandledCharge, ItemAttrShortcut, ChargeAttrShortcut):
             # numcycles = math.floor(module_capacity / (module_volume * module_chargerate))
             chargeRate = self.getModifiedItemAttr("chargeRate")
             numCharges = self.numCharges
-            numShots = floor(numCharges / chargeRate)
+            numShots = math.floor(numCharges / chargeRate)
         else:
             numShots = None
         return numShots
@@ -323,7 +301,7 @@ class Module(HandledItem, HandledCharge, ItemAttrShortcut, ChargeAttrShortcut):
                 chance = self.getModifiedChargeAttr("crystalVolatilityChance")
                 damage = self.getModifiedChargeAttr("crystalVolatilityDamage")
                 crystals = self.numCharges
-                numShots = floor((crystals * hp) / (damage * chance))
+                numShots = math.floor((crystals * hp) / (damage * chance))
             else:
                 # Set 0 (infinite) for permanent crystals like t1 laser crystals
                 numShots = 0
@@ -419,12 +397,16 @@ class Module(HandledItem, HandledCharge, ItemAttrShortcut, ChargeAttrShortcut):
             if self.isEmpty:
                 self.__miningyield = 0
             else:
-                if self.state >= State.ACTIVE:
+                if self.state >= FittingModuleState.ACTIVE:
                     volley = self.getModifiedItemAttr("specialtyMiningAmount") or self.getModifiedItemAttr(
                             "miningAmount") or 0
                     if volley:
-                        cycleTime = self.cycleTime
-                        self.__miningyield = volley / (cycleTime / 1000.0)
+                        cycleParams = self.getCycleParameters()
+                        if cycleParams is None:
+                            self.__miningyield = 0
+                        else:
+                            cycleTime = cycleParams.averageTime
+                            self.__miningyield = volley / (cycleTime / 1000.0)
                     else:
                         self.__miningyield = 0
                 else:
@@ -432,91 +414,149 @@ class Module(HandledItem, HandledCharge, ItemAttrShortcut, ChargeAttrShortcut):
 
         return self.__miningyield
 
-    def getVolley(self, spoolOptions=None, targetResists=None, ignoreState=False):
-        if self.isEmpty or (self.state < State.ACTIVE and not ignoreState):
-            return DmgTypes(0, 0, 0, 0)
+    def isDealingDamage(self, ignoreState=False):
+        volleyParams = self.getVolleyParameters(ignoreState=ignoreState)
+        for volley in volleyParams.values():
+            if volley.total > 0:
+                return True
+        return False
+
+    def getVolleyParameters(self, spoolOptions=None, targetProfile=None, ignoreState=False):
+        if self.isEmpty or (self.state < FittingModuleState.ACTIVE and not ignoreState):
+            return {0: DmgTypes(0, 0, 0, 0)}
         if self.__baseVolley is None:
+            self.__baseVolley = {}
             dmgGetter = self.getModifiedChargeAttr if self.charge else self.getModifiedItemAttr
             dmgMult = self.getModifiedItemAttr("damageMultiplier", 1)
-            self.__baseVolley = DmgTypes(
-                em=(dmgGetter("emDamage", 0)) * dmgMult,
-                thermal=(dmgGetter("thermalDamage", 0)) * dmgMult,
-                kinetic=(dmgGetter("kineticDamage", 0)) * dmgMult,
-                explosive=(dmgGetter("explosiveDamage", 0)) * dmgMult)
+            # Some delay attributes have non-0 default value, so we have to pick according to effects
+            if {'superWeaponAmarr', 'superWeaponCaldari', 'superWeaponGallente', 'superWeaponMinmatar', 'lightningWeapon'}.intersection(self.item.effects):
+                dmgDelay = self.getModifiedItemAttr("damageDelayDuration", 0)
+            elif {'doomsdayBeamDOT', 'doomsdaySlash', 'doomsdayConeDOT'}.intersection(self.item.effects):
+                dmgDelay = self.getModifiedItemAttr("doomsdayWarningDuration", 0)
+            else:
+                dmgDelay = 0
+            dmgDuration = self.getModifiedItemAttr("doomsdayDamageDuration", 0)
+            dmgSubcycle = self.getModifiedItemAttr("doomsdayDamageCycleTime", 0)
+            # Reaper DD can damage each target only once
+            if dmgDuration != 0 and dmgSubcycle != 0 and 'doomsdaySlash' not in self.item.effects:
+                subcycles = math.floor(floatUnerr(dmgDuration / dmgSubcycle))
+            else:
+                subcycles = 1
+            for i in range(subcycles):
+                self.__baseVolley[dmgDelay + dmgSubcycle * i] = DmgTypes(
+                    em=(dmgGetter("emDamage", 0)) * dmgMult,
+                    thermal=(dmgGetter("thermalDamage", 0)) * dmgMult,
+                    kinetic=(dmgGetter("kineticDamage", 0)) * dmgMult,
+                    explosive=(dmgGetter("explosiveDamage", 0)) * dmgMult)
         spoolType, spoolAmount = resolveSpoolOptions(spoolOptions, self)
         spoolBoost = calculateSpoolup(
             self.getModifiedItemAttr("damageMultiplierBonusMax", 0),
             self.getModifiedItemAttr("damageMultiplierBonusPerCycle", 0),
             self.rawCycleTime / 1000, spoolType, spoolAmount)[0]
         spoolMultiplier = 1 + spoolBoost
-        volley = DmgTypes(
-            em=self.__baseVolley.em * spoolMultiplier * (1 - getattr(targetResists, "emAmount", 0)),
-            thermal=self.__baseVolley.thermal * spoolMultiplier * (1 - getattr(targetResists, "thermalAmount", 0)),
-            kinetic=self.__baseVolley.kinetic * spoolMultiplier * (1 - getattr(targetResists, "kineticAmount", 0)),
-            explosive=self.__baseVolley.explosive * spoolMultiplier * (1 - getattr(targetResists, "explosiveAmount", 0)))
-        return volley
+        adjustedVolley = {}
+        for volleyTime, volleyValue in self.__baseVolley.items():
+            adjustedVolley[volleyTime] = DmgTypes(
+                em=volleyValue.em * spoolMultiplier * (1 - getattr(targetProfile, "emAmount", 0)),
+                thermal=volleyValue.thermal * spoolMultiplier * (1 - getattr(targetProfile, "thermalAmount", 0)),
+                kinetic=volleyValue.kinetic * spoolMultiplier * (1 - getattr(targetProfile, "kineticAmount", 0)),
+                explosive=volleyValue.explosive * spoolMultiplier * (1 - getattr(targetProfile, "explosiveAmount", 0)))
+        return adjustedVolley
 
-    def getDps(self, spoolOptions=None, targetResists=None, ignoreState=False):
-        volley = self.getVolley(spoolOptions=spoolOptions, targetResists=targetResists, ignoreState=ignoreState)
-        if not volley:
+    def getVolley(self, spoolOptions=None, targetProfile=None, ignoreState=False):
+        volleyParams = self.getVolleyParameters(spoolOptions=spoolOptions, targetProfile=targetProfile, ignoreState=ignoreState)
+        if len(volleyParams) == 0:
             return DmgTypes(0, 0, 0, 0)
-        # Some weapons repeat multiple times in one cycle (bosonic doomsdays). Get the number of times it fires off
-        volleysPerCycle = max(self.getModifiedItemAttr("doomsdayDamageDuration", 1) / self.getModifiedItemAttr("doomsdayDamageCycleTime", 1), 1)
-        dpsFactor = volleysPerCycle / (self.cycleTime / 1000)
+        return volleyParams[min(volleyParams)]
+
+    def getDps(self, spoolOptions=None, targetProfile=None, ignoreState=False):
+        dmgDuringCycle = DmgTypes(0, 0, 0, 0)
+        cycleParams = self.getCycleParameters()
+        if cycleParams is None:
+            return dmgDuringCycle
+        volleyParams = self.getVolleyParameters(spoolOptions=spoolOptions, targetProfile=targetProfile, ignoreState=ignoreState)
+        avgCycleTime = cycleParams.averageTime
+        if len(volleyParams) == 0 or avgCycleTime == 0:
+            return dmgDuringCycle
+        for volleyValue in volleyParams.values():
+            dmgDuringCycle += volleyValue
+        dpsFactor = 1 / (avgCycleTime / 1000)
         dps = DmgTypes(
-            em=volley.em * dpsFactor,
-            thermal=volley.thermal * dpsFactor,
-            kinetic=volley.kinetic * dpsFactor,
-            explosive=volley.explosive * dpsFactor)
+            em=dmgDuringCycle.em * dpsFactor,
+            thermal=dmgDuringCycle.thermal * dpsFactor,
+            kinetic=dmgDuringCycle.kinetic * dpsFactor,
+            explosive=dmgDuringCycle.explosive * dpsFactor)
         return dps
 
-    def getRemoteReps(self, spoolOptions=None, ignoreState=False):
-        if self.isEmpty or (self.state < State.ACTIVE and not ignoreState):
-            return None, 0
+    def isRemoteRepping(self, ignoreState=False):
+        repParams = self.getRepAmountParameters(ignoreState=ignoreState)
+        for rrData in repParams.values():
+            if rrData:
+                return True
+        return False
 
-        def getBaseRemoteReps(module):
-            remoteModuleGroups = {
-                "Remote Armor Repairer": "Armor",
-                "Ancillary Remote Armor Repairer": "Armor",
-                "Mutadaptive Remote Armor Repairer": "Armor",
-                "Remote Hull Repairer": "Hull",
-                "Remote Shield Booster": "Shield",
-                "Ancillary Remote Shield Booster": "Shield",
-                "Remote Capacitor Transmitter": "Capacitor"}
-            rrType = remoteModuleGroups.get(module.item.group.name, None)
-            if not rrType:
-                return None, 0
+    def getRepAmountParameters(self, spoolOptions=None, ignoreState=False):
+        if self.isEmpty or (self.state < FittingModuleState.ACTIVE and not ignoreState):
+            return {}
+        remoteModuleGroups = {
+            "Remote Armor Repairer": "Armor",
+            "Ancillary Remote Armor Repairer": "Armor",
+            "Mutadaptive Remote Armor Repairer": "Armor",
+            "Remote Hull Repairer": "Hull",
+            "Remote Shield Booster": "Shield",
+            "Ancillary Remote Shield Booster": "Shield",
+            "Remote Capacitor Transmitter": "Capacitor"}
+        rrType = remoteModuleGroups.get(self.item.group.name)
+        if rrType is None:
+            return {}
+        if self.__baseRRAmount is None:
+            self.__baseRRAmount = {}
+            shieldAmount = 0
+            armorAmount = 0
+            hullAmount = 0
+            capacitorAmount = 0
             if rrType == "Hull":
-                rrAmount = module.getModifiedItemAttr("structureDamageAmount", 0)
+                hullAmount += self.getModifiedItemAttr("structureDamageAmount", 0)
             elif rrType == "Armor":
-                rrAmount = module.getModifiedItemAttr("armorDamageAmount", 0)
+                if self.item.group.name == "Ancillary Remote Armor Repairer" and self.charge:
+                    mult = self.getModifiedItemAttr("chargedArmorDamageMultiplier", 1)
+                else:
+                    mult = 1
+                armorAmount += self.getModifiedItemAttr("armorDamageAmount", 0) * mult
             elif rrType == "Shield":
-                rrAmount = module.getModifiedItemAttr("shieldBonus", 0)
+                shieldAmount += self.getModifiedItemAttr("shieldBonus", 0)
             elif rrType == "Capacitor":
-                rrAmount = module.getModifiedItemAttr("powerTransferAmount", 0)
+                capacitorAmount += self.getModifiedItemAttr("powerTransferAmount", 0)
+            rrDelay = 0 if rrType == "Shield" else self.rawCycleTime
+            self.__baseRRAmount[rrDelay] = RRTypes(shield=shieldAmount, armor=armorAmount, hull=hullAmount, capacitor=capacitorAmount)
+        spoolType, spoolAmount = resolveSpoolOptions(spoolOptions, self)
+        spoolBoost = calculateSpoolup(
+            self.getModifiedItemAttr("repairMultiplierBonusMax", 0),
+            self.getModifiedItemAttr("repairMultiplierBonusPerCycle", 0),
+            self.rawCycleTime / 1000, spoolType, spoolAmount)[0]
+        spoolMultiplier = 1 + spoolBoost
+        adjustedRRAmount = {}
+        for rrTime, rrAmount in self.__baseRRAmount.items():
+            if spoolMultiplier == 1:
+                adjustedRRAmount[rrTime] = rrAmount
             else:
-                return None, 0
-            if rrAmount:
-                rrAmount *= 1 / (self.cycleTime / 1000)
-                if module.item.group.name == "Ancillary Remote Armor Repairer" and module.charge:
-                    rrAmount *= module.getModifiedItemAttr("chargedArmorDamageMultiplier", 1)
+                adjustedRRAmount[rrTime] = rrAmount * spoolMultiplier
+        return adjustedRRAmount
 
-            return rrType, rrAmount
-
-        if self.__baseRemoteReps is None:
-            self.__baseRemoteReps = getBaseRemoteReps(self)
-
-        rrType, rrAmount = self.__baseRemoteReps
-
-        if rrType and rrAmount and self.item.group.name == "Mutadaptive Remote Armor Repairer":
-            spoolType, spoolAmount = resolveSpoolOptions(spoolOptions, self)
-            spoolBoost = calculateSpoolup(
-                self.getModifiedItemAttr("repairMultiplierBonusMax", 0),
-                self.getModifiedItemAttr("repairMultiplierBonusPerCycle", 0),
-                self.rawCycleTime / 1000, spoolType, spoolAmount)[0]
-            rrAmount *= (1 + spoolBoost)
-
-        return rrType, rrAmount
+    def getRemoteReps(self, spoolOptions=None, ignoreState=False, reloadOverride=None):
+        rrDuringCycle = RRTypes(0, 0, 0, 0)
+        cycleParams = self.getCycleParameters(reloadOverride=reloadOverride)
+        if cycleParams is None:
+            return rrDuringCycle
+        repAmountParams = self.getRepAmountParameters(spoolOptions=spoolOptions, ignoreState=ignoreState)
+        avgCycleTime = cycleParams.averageTime
+        if len(repAmountParams) == 0 or avgCycleTime == 0:
+            return rrDuringCycle
+        for rrAmount in repAmountParams.values():
+            rrDuringCycle += rrAmount
+        rrFactor = 1 / (avgCycleTime / 1000)
+        rps = rrDuringCycle * rrFactor
+        return rps
 
     def getSpoolData(self, spoolOptions=None):
         weaponMultMax = self.getModifiedItemAttr("damageMultiplierBonusMax", 0)
@@ -573,38 +613,14 @@ class Module(HandledItem, HandledCharge, ItemAttrShortcut, ChargeAttrShortcut):
         if not fits and fit.ignoreRestrictions:
             self.restrictionOverridden = True
             fits = True
+        elif fits and fit.ignoreRestrictions:
+            self.restrictionOverridden = False
 
         return fits
 
     def __fitRestrictions(self, fit, hardpointLimit=True):
-        # Check ship type restrictions
-        fitsOnType = set()
-        fitsOnGroup = set()
 
-        shipType = self.getModifiedItemAttr("fitsToShipType", None)
-        if shipType is not None:
-            fitsOnType.add(shipType)
-
-        for attr in list(self.itemModifiedAttributes.keys()):
-            if attr.startswith("canFitShipType"):
-                shipType = self.getModifiedItemAttr(attr, None)
-                if shipType is not None:
-                    fitsOnType.add(shipType)
-
-        for attr in list(self.itemModifiedAttributes.keys()):
-            if attr.startswith("canFitShipGroup"):
-                shipGroup = self.getModifiedItemAttr(attr, None)
-                if shipGroup is not None:
-                    fitsOnGroup.add(shipGroup)
-
-        if (len(fitsOnGroup) > 0 or len(fitsOnType) > 0) \
-                and fit.ship.item.group.ID not in fitsOnGroup \
-                and fit.ship.item.ID not in fitsOnType:
-            return False
-
-        # Citadel modules are now under a new category, so we can check this to ensure only structure modules can fit on a citadel
-        if isinstance(fit.ship, Citadel) and self.item.category.name != "Structure Module" or \
-                not isinstance(fit.ship, Citadel) and self.item.category.name == "Structure Module":
+        if not fit.canFit(self.item):
             return False
 
         # EVE doesn't let capital modules be fit onto subcapital hulls. Confirmed by CCP Larrikin that this is dictated
@@ -613,14 +629,16 @@ class Module(HandledItem, HandledCharge, ItemAttrShortcut, ChargeAttrShortcut):
             return False
 
         # If the mod is a subsystem, don't let two subs in the same slot fit
-        if self.slot == Slot.SUBSYSTEM:
+        if self.slot == FittingSlot.SUBSYSTEM:
             subSlot = self.getModifiedItemAttr("subSystemSlot")
             for mod in fit.modules:
+                if mod is self:
+                    continue
                 if mod.getModifiedItemAttr("subSystemSlot") == subSlot:
                     return False
 
         # Check rig sizes
-        if self.slot == Slot.RIG:
+        if self.slot == FittingSlot.RIG:
             if self.getModifiedItemAttr("rigSize") != fit.ship.getModifiedItemAttr("rigSize"):
                 return False
 
@@ -630,7 +648,7 @@ class Module(HandledItem, HandledCharge, ItemAttrShortcut, ChargeAttrShortcut):
             current = 0  # if self.owner != fit else -1  # Disabled, see #1278
             for mod in fit.modules:
                 if (mod.item and mod.item.groupID == self.item.groupID and
-                        self.modPosition != mod.modPosition):
+                        self.getModPosition(fit) != mod.getModPosition(fit)):
                     current += 1
 
             if current >= max:
@@ -650,39 +668,56 @@ class Module(HandledItem, HandledCharge, ItemAttrShortcut, ChargeAttrShortcut):
         # Check if we're within bounds
         if state < -1 or state > 2:
             return False
-        elif state >= State.ACTIVE and not self.item.isType("active"):
+        elif state >= FittingModuleState.ACTIVE and (not self.item.isType("active") or self.getModifiedItemAttr('activationBlocked') > 0):
             return False
-        elif state == State.OVERHEATED and not self.item.isType("overheat"):
+        elif state == FittingModuleState.OVERHEATED and not self.item.isType("overheat"):
             return False
         else:
             return True
 
+    def getMaxState(self, proposedState=None):
+        states = sorted((s for s in FittingModuleState if proposedState is None or s <= proposedState), reverse=True)
+        for state in states:
+            if self.isValidState(state):
+                return state
+
     def canHaveState(self, state=None, projectedOnto=None):
         """
-        Check with other modules if there are restrictions that might not allow this module to be activated
+        Check with other modules if there are restrictions that might not allow this module to be activated.
+        Returns True if state is allowed, or max state module can have if current state is invalid.
         """
-        # If we're going to set module to offline or online for local modules or offline for projected,
-        # it should be fine for all cases
+        # If we're going to set module to offline, it should be fine for all cases
         item = self.item
-        if (state <= State.ONLINE and projectedOnto is None) or (state <= State.OFFLINE):
+        if state <= FittingModuleState.OFFLINE:
             return True
 
         # Check if the local module is over it's max limit; if it's not, we're fine
+        maxGroupOnline = self.getModifiedItemAttr("maxGroupOnline", None)
         maxGroupActive = self.getModifiedItemAttr("maxGroupActive", None)
-        if maxGroupActive is None and projectedOnto is None:
+        if maxGroupOnline is None and maxGroupActive is None and projectedOnto is None:
             return True
 
         # Following is applicable only to local modules, we do not want to limit projected
         if projectedOnto is None:
+            currOnline = 0
             currActive = 0
             group = item.group.name
+            maxState = None
             for mod in self.owner.modules:
                 currItem = getattr(mod, "item", None)
-                if mod.state >= State.ACTIVE and currItem is not None and currItem.group.name == group:
-                    currActive += 1
-                if currActive > maxGroupActive:
-                    break
-            return currActive <= maxGroupActive
+                if currItem is not None and currItem.group.name == group:
+                    if mod.state >= FittingModuleState.ONLINE:
+                        currOnline += 1
+                    if mod.state >= FittingModuleState.ACTIVE:
+                        currActive += 1
+                    if maxGroupOnline is not None and currOnline > maxGroupOnline:
+                        if maxState is None or maxState > FittingModuleState.OFFLINE:
+                            maxState = FittingModuleState.OFFLINE
+                            break
+                    if maxGroupActive is not None and currActive > maxGroupActive:
+                        if maxState is None or maxState > FittingModuleState.ONLINE:
+                            maxState = FittingModuleState.ONLINE
+            return True if maxState is None else maxState
         # For projected, we're checking if ship is vulnerable to given item
         else:
             # Do not allow to apply offensive modules on ship with offensive module immunite, with few exceptions
@@ -693,10 +728,10 @@ class Module(HandledItem, HandledCharge, ItemAttrShortcut, ChargeAttrShortcut):
                                          "energyNosferatuFalloff",
                                          "energyNeutralizerFalloff"}
                 if not offensiveNonModifiers.intersection(set(item.effects)):
-                    return False
+                    return FittingModuleState.OFFLINE
             # If assistive modules are not allowed, do not let to apply these altogether
             if item.assistive and projectedOnto.ship.getModifiedItemAttr("disallowAssistance") == 1:
-                return False
+                return FittingModuleState.OFFLINE
             return True
 
     def isValidCharge(self, charge):
@@ -741,28 +776,28 @@ class Module(HandledItem, HandledCharge, ItemAttrShortcut, ChargeAttrShortcut):
     @staticmethod
     def __calculateHardpoint(item):
         effectHardpointMap = {
-            "turretFitted"  : Hardpoint.TURRET,
-            "launcherFitted": Hardpoint.MISSILE
+            "turretFitted"  : FittingHardpoint.TURRET,
+            "launcherFitted": FittingHardpoint.MISSILE
         }
 
         if item is None:
-            return Hardpoint.NONE
+            return FittingHardpoint.NONE
 
         for effectName, slot in effectHardpointMap.items():
             if effectName in item.effects:
                 return slot
 
-        return Hardpoint.NONE
+        return FittingHardpoint.NONE
 
     @staticmethod
-    def __calculateSlot(item):
+    def calculateSlot(item):
         effectSlotMap = {
-            "rigSlot"    : Slot.RIG,
-            "loPower"    : Slot.LOW,
-            "medPower"   : Slot.MED,
-            "hiPower"    : Slot.HIGH,
-            "subSystem"  : Slot.SUBSYSTEM,
-            "serviceSlot": Slot.SERVICE
+            "rigSlot"    : FittingSlot.RIG.value,
+            "loPower"    : FittingSlot.LOW.value,
+            "medPower"   : FittingSlot.MED.value,
+            "hiPower"    : FittingSlot.HIGH.value,
+            "subSystem"  : FittingSlot.SUBSYSTEM.value,
+            "serviceSlot": FittingSlot.SERVICE.value
         }
         if item is None:
             return None
@@ -770,9 +805,9 @@ class Module(HandledItem, HandledCharge, ItemAttrShortcut, ChargeAttrShortcut):
             if effectName in item.effects:
                 return slot
         if item.group.name in Module.SYSTEM_GROUPS:
-            return Slot.SYSTEM
+            return FittingSlot.SYSTEM
 
-        raise ValueError("Passed item does not fit in any known slot")
+        return None
 
     @validates("ID", "itemID", "ammoID")
     def validator(self, key, val):
@@ -789,7 +824,7 @@ class Module(HandledItem, HandledCharge, ItemAttrShortcut, ChargeAttrShortcut):
 
     def clear(self):
         self.__baseVolley = None
-        self.__baseRemoteReps = None
+        self.__baseRRAmount = None
         self.__miningyield = None
         self.__reloadTime = None
         self.__reloadForce = None
@@ -814,31 +849,29 @@ class Module(HandledItem, HandledCharge, ItemAttrShortcut, ChargeAttrShortcut):
             context = ("module",)
             projected = False
 
-        # if gang:
-        #     context += ("commandRun",)
-
         if self.charge is not None:
             # fix for #82 and it's regression #106
             if not projected or (self.projected and not forceProjected) or gang:
                 for effect in self.charge.effects.values():
-                    if effect.runTime == runTime and \
-                            effect.activeByDefault and \
-                            (effect.isType("offline") or
-                                 (effect.isType("passive") and self.state >= State.ONLINE) or
-                                 (effect.isType("active") and self.state >= State.ACTIVE)) and \
-                            (not gang or (gang and effect.isType("gang"))):
-
-                        chargeContext = ("moduleCharge",)
-                        # For gang effects, we pass in the effect itself as an argument. However, to avoid going through
-                        # all the effect files and defining this argument, do a simple try/catch here and be done with it.
+                    if (
+                        effect.runTime == runTime and
+                        effect.activeByDefault and (
+                            effect.isType("offline") or
+                            (effect.isType("passive") and self.state >= FittingModuleState.ONLINE) or
+                            (effect.isType("active") and self.state >= FittingModuleState.ACTIVE)) and
+                        (not gang or (gang and effect.isType("gang")))
+                    ):
+                        contexts = ("moduleCharge",)
+                        # For gang effects, we pass in the effect itself as an argument. However, to avoid going through all
+                        # the effect definitions and defining this argument, do a simple try/catch here and be done with it.
                         # @todo: possibly fix this
                         try:
-                            effect.handler(fit, self, chargeContext, effect=effect)
+                            effect.handler(fit, self, contexts, effect=effect)
                         except:
-                            effect.handler(fit, self, chargeContext)
+                            effect.handler(fit, self, contexts)
 
         if self.item:
-            if self.state >= State.OVERHEATED:
+            if self.state >= FittingModuleState.OVERHEATED:
                 for effect in self.item.effects.values():
                     if effect.runTime == runTime and \
                             effect.isType("overheat") \
@@ -851,8 +884,8 @@ class Module(HandledItem, HandledCharge, ItemAttrShortcut, ChargeAttrShortcut):
                 if effect.runTime == runTime and \
                         effect.activeByDefault and \
                         (effect.isType("offline") or
-                             (effect.isType("passive") and self.state >= State.ONLINE) or
-                             (effect.isType("active") and self.state >= State.ACTIVE)) \
+                         (effect.isType("passive") and self.state >= FittingModuleState.ONLINE) or
+                         (effect.isType("active") and self.state >= FittingModuleState.ACTIVE)) \
                         and ((projected and effect.isType("projected")) or not projected) \
                         and ((gang and effect.isType("gang")) or not gang):
                     try:
@@ -860,49 +893,62 @@ class Module(HandledItem, HandledCharge, ItemAttrShortcut, ChargeAttrShortcut):
                     except:
                         effect.handler(fit, self, context)
 
-    @property
-    def cycleTime(self):
+    def getCycleParameters(self, reloadOverride=None):
+        """Copied from new eos as well"""
         # Determine if we'll take into account reload time or not
-        factorReload = self.owner.factorReload if self.forceReload is None else self.forceReload
-
-        numShots = self.numShots
-        speed = self.rawCycleTime
-
-        if factorReload and self.charge:
-            raw_reload_time = self.reloadTime
+        if reloadOverride is not None:
+            factorReload = reloadOverride
         else:
-            raw_reload_time = 0.0
+            factorReload = self.owner.factorReload if self.forceReload is None else self.forceReload
 
-        # Module can only fire one shot at a time, think bomb launchers or defender launchers
-        if self.disallowRepeatingAction:
-            if numShots > 0:
-                """
-                The actual mechanics behind this is complex.  Behavior will be (for 3 ammo):
-                    fire, reactivation delay, fire, reactivation delay, fire, max(reactivation delay, reload)
-                so your effective reload time depends on where you are at in the cycle.
+        cycles_until_reload = self.numShots
+        if cycles_until_reload == 0:
+            cycles_until_reload = math.inf
 
-                We can't do that, so instead we'll average it out.
-
-                Currently would apply to bomb launchers and defender missiles
-                """
-                effective_reload_time = ((self.reactivationDelay * (numShots - 1)) + max(raw_reload_time, self.reactivationDelay, 0))
-            else:
-                """
-                Applies to MJD/MJFG
-                """
-                effective_reload_time = max(raw_reload_time, self.reactivationDelay, 0)
-                speed = speed + effective_reload_time
+        active_time = self.rawCycleTime
+        if active_time == 0:
+            return None
+        forced_inactive_time = self.reactivationDelay
+        reload_time = self.reloadTime
+        # Effects which cannot be reloaded have the same processing whether
+        # caller wants to take reload time into account or not
+        if reload_time is None and cycles_until_reload < math.inf:
+            final_cycles = 1
+            early_cycles = cycles_until_reload - final_cycles
+            # Single cycle until effect cannot run anymore
+            if early_cycles == 0:
+                return CycleInfo(active_time, 0, 1, False)
+            # Multiple cycles with the same parameters
+            if forced_inactive_time == 0:
+                return CycleInfo(active_time, 0, cycles_until_reload, False)
+            # Multiple cycles with different parameters
+            return CycleSequence((
+                CycleInfo(active_time, forced_inactive_time, early_cycles, False),
+                CycleInfo(active_time, 0, final_cycles, False)
+            ), 1)
+        # Module cycles the same way all the time in 3 cases:
+        # 1) caller doesn't want to take into account reload time
+        # 2) effect does not have to reload anything to keep running
+        # 3) effect has enough time to reload during inactivity periods
+        if (
+            not factorReload or
+            cycles_until_reload == math.inf or
+            forced_inactive_time >= reload_time
+        ):
+            isInactivityReload = factorReload and forced_inactive_time >= reload_time
+            return CycleInfo(active_time, forced_inactive_time, math.inf, isInactivityReload)
+        # We've got to take reload into consideration
         else:
-            """
-            Currently no other modules would have a reactivation delay, so for sanities sake don't try and account for it.
-            Okay, technically cloaks do, but they also have 0 cycle time and cap usage so why do you care?
-            """
-            effective_reload_time = raw_reload_time
-
-        if numShots > 0 and self.charge:
-            speed = (speed * numShots + effective_reload_time) / numShots
-
-        return speed
+            final_cycles = 1
+            early_cycles = cycles_until_reload - final_cycles
+            # If effect has to reload after each its cycle, then its parameters
+            # are the same all the time
+            if early_cycles == 0:
+                return CycleInfo(active_time, reload_time, math.inf, True)
+            return CycleSequence((
+                CycleInfo(active_time, forced_inactive_time, early_cycles, False),
+                CycleInfo(active_time, reload_time, final_cycles, True)
+            ), math.inf)
 
     @property
     def rawCycleTime(self):
@@ -927,8 +973,11 @@ class Module(HandledItem, HandledCharge, ItemAttrShortcut, ChargeAttrShortcut):
     @property
     def capUse(self):
         capNeed = self.getModifiedItemAttr("capacitorNeed")
-        if capNeed and self.state >= State.ACTIVE:
-            cycleTime = self.cycleTime
+        if capNeed and self.state >= FittingModuleState.ACTIVE:
+            cycleParams = self.getCycleParameters()
+            if cycleParams is None:
+                return 0
+            cycleTime = cycleParams.averageTime
             if cycleTime > 0:
                 capUsed = capNeed / (cycleTime / 1000.0)
                 return capUsed
@@ -937,12 +986,11 @@ class Module(HandledItem, HandledCharge, ItemAttrShortcut, ChargeAttrShortcut):
 
     @staticmethod
     def getProposedState(mod, click, proposedState=None):
-        # todo: instead of passing in module, make this a instanced function.
         pyfalog.debug("Get proposed state for module.")
-        if mod.slot == Slot.SUBSYSTEM or mod.isEmpty:
-            return State.ONLINE
+        if mod.slot == FittingSlot.SUBSYSTEM or mod.isEmpty:
+            return FittingModuleState.ONLINE
 
-        if mod.slot == Slot.SYSTEM:
+        if mod.slot == FittingSlot.SYSTEM:
             transitionMap = ProjectedSystem
         else:
             transitionMap = ProjectedMap if mod.projected else LocalMap
@@ -952,18 +1000,17 @@ class Module(HandledItem, HandledCharge, ItemAttrShortcut, ChargeAttrShortcut):
         if proposedState is not None:
             state = proposedState
         elif click == "right":
-            state = State.OVERHEATED
+            state = FittingModuleState.OVERHEATED
         elif click == "ctrl":
-            state = State.OFFLINE
+            state = FittingModuleState.OFFLINE
         else:
             state = transitionMap[currState]
-            if not mod.isValidState(state):
-                state = -1
+            # If passive module tries to transition into online and fails,
+            # put it to passive instead
+            if not mod.isValidState(state) and currState == FittingModuleState.ONLINE:
+                state = FittingModuleState.OFFLINE
 
-        if mod.isValidState(state):
-            return state
-        else:
-            return currState
+        return mod.getMaxState(proposedState=state)
 
     def __deepcopy__(self, memo):
         item = self.item
@@ -973,11 +1020,23 @@ class Module(HandledItem, HandledCharge, ItemAttrShortcut, ChargeAttrShortcut):
             copy = Module(self.item, self.baseItem, self.mutaplasmid)
         copy.charge = self.charge
         copy.state = self.state
+        copy.spoolType = self.spoolType
+        copy.spoolAmount = self.spoolAmount
 
         for x in self.mutators.values():
             Mutator(copy, x.attribute, x.value)
 
         return copy
+
+    def rebase(self, item):
+        state = self.state
+        charge = self.charge
+        Module.__init__(self, item, self.baseItem, self.mutaplasmid)
+        self.state = state
+        if self.isValidCharge(charge):
+            self.charge = charge
+        for x in self.mutators.values():
+            Mutator(self, x.attribute, x.value)
 
     def __repr__(self):
         if self.item:
